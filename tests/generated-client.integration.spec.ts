@@ -104,7 +104,9 @@ beforeAll(async () => {
   await writeFile(path.join(projectsDir, 'demo.txt'), 'hello from integration test');
 
   // listenPort: 0 lets the OS pick a free port; the backend reports the actual
-  // assigned port on stdout and the spec connects the client to it.
+  // assigned port on stdout and the spec connects the client to it. The config
+  // carries NO oidc block: the spawned backend runs with YAFM_DISABLE_AUTH=1,
+  // which skips the oidc requirement in debug builds (see backend/src/auth.rs).
   await writeFile(
     configPath,
     `sharedRoot: "${sharedRoot}"\nshowHidden: false\nlistenAddress: 127.0.0.1\nlistenPort: 0\n`
@@ -112,7 +114,12 @@ beforeAll(async () => {
 
   backendProcess = spawn('cargo', ['run', '--bin', 'backend', '--', configPath], {
     cwd: path.join(repoRoot, 'backend'),
-    env: process.env,
+    // YAFM_DISABLE_AUTH is the debug-gated test backdoor in backend/src/auth.rs:
+    // the spawned `cargo run` is a debug build, so the flag initializes the
+    // test-only Disabled auth state and skips the required oidc config block,
+    // which this spec's config deliberately does not carry. Release builds
+    // ignore the flag and refuse to start without the oidc block.
+    env: { ...process.env, YAFM_DISABLE_AUTH: '1' },
     detached: true,
     stdio: ['ignore', 'pipe', 'pipe']
   });

@@ -1,9 +1,17 @@
 # cargo-deny configuration: https://embarkstudios.github.io/cargo-deny/checks/cfg.html
-# Vulnerability advisories always fail. Unmaintained advisories fail for direct
-# workspace dependencies (the ones we can act on) and only warn for transitive ones.
+# Vulnerability advisories fail unless explicitly ignored below (each ignore
+# entry cites why it does not apply here). Unmaintained advisories fail for
+# direct workspace dependencies (the ones we can act on) and only warn for
+# transitive ones.
 
 [advisories]
 unmaintained = "workspace"
+# rsa 0.9.10 (RUSTSEC-2023-0071, Marvin Attack) is a hard, non-optional
+# dependency of openidconnect 4.0.1 (RSA JWKS signature verification); no safe
+# upgrade is available (0.9.10 is the newest non-yanked release). The attack
+# requires private-key operations, while this backend only performs public-key
+# verification, so the timing sidechannel is not applicable to this use.
+ignore = ["RUSTSEC-2023-0071"]
 
 [licenses]
 # Matches the project's AGPL-3.0-only stance plus the licenses used by the current
@@ -18,6 +26,14 @@ allow = [
     "MIT",
     "Unicode-3.0",
     "Unlicense",
+    # ISC comes from the rustls crypto stack added with the OIDC client (ring is
+    # Apache-2.0 AND ISC; rustls-webpki and untrusted are ISC) — unavoidable with
+    # any rustls crypto provider, and permissive like the MIT/Apache entries here.
+    "ISC",
+    # CDLA-Permissive-2.0 comes from webpki-roots, pulled in by reqwest's
+    # rustls-tls = rustls-tls-webpki-roots feature unified with openidconnect's
+    # async HTTP client. A permissive data-license, consistent with AGPL-3.0-only.
+    "CDLA-Permissive-2.0",
 ]
 
 [bans]

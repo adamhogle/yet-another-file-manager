@@ -54,6 +54,25 @@ async fn run() -> Result<(), String> {
         env::current_dir().map_err(|_| "Could not determine current directory".to_string())?;
     let config_path = resolve_config_path(env::args().skip(1), &cwd)?;
     backend::initialize_app_config(&config_path)?;
+
+    // In release builds the test-only env var is ignored; warn so a stray flag
+    // is visible instead of silently dropped.
+    let disable_auth_env = env::var("YAFM_DISABLE_AUTH").ok();
+    if !cfg!(debug_assertions) && disable_auth_env.is_some() {
+        tracing::warn!("YAFM_DISABLE_AUTH is a test-only flag and is ignored in release builds.");
+    }
+
+    // The only way to disable auth: the debug-gated test backdoor. The env var
+    // is honored only by development builds (cfg!(debug_assertions)) and skips
+    // the oidc requirement entirely; the release image always enforces auth.
+    // The check runs BEFORE initialize_auth so the flag is honored before the
+    // oidc requirement is evaluated.
+    if cfg!(debug_assertions) && disable_auth_env.as_deref() == Some("1") {
+        backend::auth::initialize_auth_disabled_for_tests();
+    } else {
+        backend::auth::initialize_auth()?;
+    }
+
     let binding = backend::get_server_binding()?;
     let listen_address = format!("{}:{}", binding.address, binding.port);
 

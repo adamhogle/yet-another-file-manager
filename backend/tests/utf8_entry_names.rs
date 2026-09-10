@@ -25,6 +25,9 @@ async fn invalid_utf8_entry_names_are_listed_encoded_and_re_openable() {
     std::fs::write(shared_root.join(Path::new(raw_name)), "payload").expect("write file");
 
     backend::initialize_app_config(&config_path).expect("initialize app config");
+    // The gate fails closed on uninitialized auth state; the test-only
+    // Disabled state preserves this binary's UTF-8-name coverage.
+    backend::initialize_auth_disabled_for_tests();
     let app = backend::app_router();
 
     let response = app

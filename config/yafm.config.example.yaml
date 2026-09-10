@@ -4,3 +4,18 @@ sharedRoot: ../dev-data/share
 showHidden: false
 listenAddress: 0.0.0.0
 listenPort: 8080
+
+# OIDC authentication (authentik). Required: the backend refuses to start
+# without it. Get the issuer from the provider's .well-known/openid-configuration
+# (default issuer mode is per-provider: .../application/o/<application slug>/).
+oidc:
+  issuer: https://authentik.example.com/application/o/yafm/
+  clientId: yafm-spa
+  clientSecret: replace-me
+  redirectUri: https://files.example.com/api/v1/auth/callback
+  # Independent cookie-signing key. Optional: when omitted, a random key is
+  # generated per process and every restart invalidates outstanding
+  # sessions. Generate a stable key with: openssl rand -base64 32
+  # sessionSigningKey: <base64 key>
+  # Set false explicitly only with a loopback http redirectUri for local development.
+  cookieSecure: true

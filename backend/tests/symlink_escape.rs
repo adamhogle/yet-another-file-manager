@@ -44,6 +44,9 @@ async fn symlinked_entries_escaping_the_shared_root_are_not_served() {
 
     write_test_config(&config_path, &shared_root);
     backend::initialize_app_config(&config_path).expect("initialize app config");
+    // The gate fails closed on uninitialized auth state; the test-only
+    // Disabled state preserves this binary's symlink-safety coverage.
+    backend::initialize_auth_disabled_for_tests();
     let app = backend::app_router();
 
     // A symlink inside the root pointing outside must not serve the outside file:

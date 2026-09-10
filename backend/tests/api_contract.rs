@@ -26,6 +26,9 @@ async fn directory_endpoint_matches_contract_shape_and_status_codes() {
     write_test_config(&config_path, &shared_root);
 
     backend::initialize_app_config(&config_path).expect("initialize app config");
+    // The gate fails closed on uninitialized auth state; the test-only Disabled
+    // state preserves this test's purpose (path safety, contract shapes).
+    backend::initialize_auth_disabled_for_tests();
 
     let app = backend::app_router();
 
@@ -202,6 +205,10 @@ async fn directory_endpoint_matches_contract_shape_and_status_codes() {
 
 #[tokio::test]
 async fn embedded_frontend_serves_index_and_preserves_unknown_api_404() {
+    // The gate fails closed on uninitialized auth state; the test-only
+    // Disabled state preserves this test's contract-shape assertions.
+    backend::initialize_auth_disabled_for_tests();
+
     let app = backend::app_router();
 
     let root_response = app
@@ -305,6 +312,10 @@ async fn embedded_frontend_serves_index_and_preserves_unknown_api_404() {
 
 #[tokio::test]
 async fn health_endpoint_reports_ok_and_the_service_name() {
+    // The gate fails closed on uninitialized auth state; the test-only
+    // Disabled state preserves this test's health-shape assertions.
+    backend::initialize_auth_disabled_for_tests();
+
     let app = backend::app_router();
 
     let response = app

@@ -32,6 +32,9 @@ npm ci
 npm run dev
 ```
 
+The example config enables OIDC authentication. Developing without an identity provider
+needs the test-only `YAFM_DISABLE_AUTH=1` flag — see [Authentication](#authentication).
+
 ## Runtime Configuration
 
 The backend expects a YAML or JSON runtime config file.
@@ -46,6 +49,74 @@ Configuration fields:
 - `showHidden` (optional): include hidden entries in listings
 - `listenAddress` (optional, default `0.0.0.0`): backend bind address
 - `listenPort` (optional, default `8080`): backend bind port
+- `oidc.issuer` (required): the provider's issuer URL, from the provider's
+  `.well-known/openid-configuration` (authentik's default issuer mode is per-provider:
+  `.../application/o/<application slug>/`)
+- `oidc.clientId` (required): OIDC client id registered at the provider
+- `oidc.clientSecret` (required): OIDC client secret registered at the provider
+- `oidc.sessionSigningKey` (optional): independent cookie-signing key for the session
+  cookie; when omitted, a random key is generated per process and every restart
+  invalidates outstanding sessions. Generate a stable key with `openssl rand -base64 32`.
+  The OIDC client secret must NOT be used here — the client secret alone would be
+  enough to mint valid sessions.
+- `oidc.redirectUri` (required): absolute https URL whose path is exactly
+  `/api/v1/auth/callback`
+- `oidc.cookieSecure` (optional, default `false`): must be `true` when `redirectUri` is https —
+  startup refuses the mismatch. Set `false` explicitly only with a loopback http `redirectUri`
+  for plain-HTTP local development.
+
+## Authentication
+
+Authentication is mandatory via config: the backend refuses to start without the `oidc`
+block. Every endpoint (directory listings, downloads, health, SPA assets) is gated
+server-side — unauthenticated `/api/*` requests get a 401 JSON error, and unauthenticated
+browser navigations redirect through the login flow. The trust-boundary decision is
+recorded in `docs/architecture/0004-oidc-authentication.md`.
+
+### Setting up authentik
+
+Create an OIDC provider application for the file manager (a confidential client with the
+client id and secret the backend gets from the `oidc` config block):
+
+- Register the redirect URI `https://<public-origin>/api/v1/auth/callback` — the path
+  must be exactly `/api/v1/auth/callback`.
+- The issuer comes from the provider's `.well-known/openid-configuration` document.
+  Authentik's default issuer mode is per-provider:
+  `https://authentik.company/application/o/<application slug>/`.
+
+Then point the backend at it:
+
+```yaml
+oidc:
+  issuer: https://authentik.company/application/o/yafm/
+  clientId: yafm-spa
+  clientSecret: replace-me
+  redirectUri: https://files.example.com/api/v1/auth/callback
+  # Set true when the site is served over HTTPS (TLS terminates at the reverse proxy).
+  cookieSecure: true
+```
+
+Deployment notes:
+
+- Discovery, JWKS, and token calls are direct server-to-server requests to the provider
+  — reverse proxies must permit them (no interactive challenges).
+- `cookieSecure: true` behind HTTPS (TLS at the reverse proxy) — startup refuses an https
+  `redirectUri` paired with `cookieSecure: false`. Set `false` explicitly only with a loopback
+  `redirectUri` for plain-HTTP local development.
+
+### Developing without authentik
+
+Local development without an identity provider uses the test-only flag
+`YAFM_DISABLE_AUTH=1`, honored only by development builds (`cfg!(debug_assertions)`;
+`cargo run` is a debug build — release builds ignore the flag and always require the
+`oidc` block):
+
+```sh
+YAFM_DISABLE_AUTH=1 npm run dev
+```
+
+With the flag set, the backend runs with the test-only disabled auth state and no `oidc`
+block is needed.
 
 ## Scripts
 

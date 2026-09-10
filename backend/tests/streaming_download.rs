@@ -64,6 +64,9 @@ async fn download_serves_full_body_range_and_etag_semantics() {
     write_test_config(&config_path, &shared_root);
 
     backend::initialize_app_config(&config_path).expect("initialize app config");
+    // The gate fails closed on uninitialized auth state; the test-only
+    // Disabled state preserves this binary's streaming coverage.
+    backend::initialize_auth_disabled_for_tests();
     let app = backend::app_router();
 
     // Plain GET: 200 with the full body, a matching Content-Length and range support.

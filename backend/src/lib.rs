@@ -1,6 +1,8 @@
 use std::ffi::OsStr;
+use std::fmt;
 use std::fs;
 use std::io::{ErrorKind, SeekFrom};
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
@@ -18,6 +20,7 @@ use rust_embed::Embed;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
+use url::{Host, Url};
 
 // The filesystem layer relies on std::os::unix APIs (dev/ino identity checks and
 // raw-byte path handling) and targets Linux, where the runtime image and CI run.
@@ -25,6 +28,13 @@ use tokio_util::io::ReaderStream;
 compile_error!("yet-another-file-manager targets unix (Linux); non-unix builds are not supported.");
 use tower_http::trace::TraceLayer;
 use utoipa::{OpenApi, ToSchema};
+
+pub mod auth;
+use auth::AuthOidcConfig;
+// Re-exported at the crate root so test binaries can call the test-only init
+// through the existing `backend::` getter pattern (the auth gate test wires it
+// before building the router).
+pub use auth::initialize_auth_disabled_for_tests;
 
 #[derive(Embed)]
 #[folder = "../frontend/dist/"]
@@ -77,6 +87,49 @@ struct ConfigFile {
     listen_address: Option<String>,
     #[serde(rename = "listenPort")]
     listen_port: Option<u16>,
+    #[serde(rename = "oidc")]
+    oidc: Option<OidcConfigFile>,
+}
+
+/// Parse-time shape of the nested `oidc` block. Kept optional inside
+/// `ConfigFile` so test configs without the block can still parse; the
+/// startup-abort decision for a missing block lives in the auth state
+/// initializer. `load_app_config` validates the block into
+/// `auth::AuthOidcConfig`.
+///
+/// Debug is written by hand with the secrets redacted: the raw `clientSecret`
+/// and `sessionSigningKey` sit here between parse and validate and must never
+/// reach a log.
+#[derive(Deserialize)]
+struct OidcConfigFile {
+    #[serde(rename = "issuer")]
+    issuer: String,
+    #[serde(rename = "clientId")]
+    client_id: String,
+    #[serde(rename = "clientSecret")]
+    client_secret: String,
+    #[serde(rename = "sessionSigningKey")]
+    session_signing_key: Option<String>,
+    #[serde(rename = "redirectUri")]
+    redirect_uri: String,
+    #[serde(rename = "cookieSecure")]
+    cookie_secure: Option<bool>,
+}
+
+impl fmt::Debug for OidcConfigFile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OidcConfigFile")
+            .field("issuer", &self.issuer)
+            .field("client_id", &self.client_id)
+            .field("client_secret", &"[redacted]")
+            .field(
+                "session_signing_key",
+                &self.session_signing_key.as_ref().map(|_| "[redacted]"),
+            )
+            .field("redirect_uri", &self.redirect_uri)
+            .field("cookie_secure", &self.cookie_secure)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -85,6 +138,7 @@ struct AppConfig {
     show_hidden: bool,
     listen_address: String,
     listen_port: u16,
+    oidc: Option<AuthOidcConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -212,12 +266,101 @@ fn load_app_config(config_path: &Path) -> Result<AppConfig, String> {
         return Err("Configuration listenAddress must be a non-empty string".to_string());
     }
 
+    let oidc = parsed.oidc.map(validate_oidc_config).transpose()?;
+
     Ok(AppConfig {
         shared_root: canonical_root,
         show_hidden: parsed.show_hidden.unwrap_or(false),
         listen_address,
         listen_port: parsed.listen_port.unwrap_or(8080),
+        oidc,
     })
+}
+
+/// The callback path the backend registers; a configured `redirectUri` pointing
+/// anywhere else would never receive the authorization code.
+const OIDC_CALLBACK_PATH: &str = "/api/v1/auth/callback";
+
+/// Validate the parsed `oidc` config block into the runtime shape. Only called
+/// when the block is present; the startup-abort decision for a missing block
+/// lives in the auth state initializer so test configs without the block can
+/// still parse.
+fn validate_oidc_config(oidc: OidcConfigFile) -> Result<AuthOidcConfig, String> {
+    let issuer = validate_https_url(&oidc.issuer, "issuer")?;
+
+    if oidc.client_id.trim().is_empty() {
+        return Err("Configuration oidc clientId must be a non-empty string.".to_string());
+    }
+    if oidc.client_secret.trim().is_empty() {
+        return Err("Configuration oidc clientSecret must be a non-empty string.".to_string());
+    }
+
+    let redirect_uri = validate_https_url(&oidc.redirect_uri, "redirectUri")?;
+    if redirect_uri.path() != OIDC_CALLBACK_PATH {
+        return Err(format!(
+            "Configuration oidc redirectUri path must be \"{OIDC_CALLBACK_PATH}\"; the backend serves the site directly."
+        ));
+    }
+
+    // Behind nginx (TLS terminating at the reverse proxy) the session cookie
+    // must carry the Secure attribute: an https redirectUri means the site is
+    // served over HTTPS, so the default (false) is the dangerous direction and
+    // an omitted field is refused too. Plain-HTTP local development keeps
+    // working through the loopback-redirectUri exception — the check triggers
+    // on the https scheme only.
+    let cookie_secure = oidc.cookie_secure.unwrap_or(false);
+    if redirect_uri.scheme() == "https" && !cookie_secure {
+        return Err("Configuration oidc cookieSecure must be true when redirectUri is an https URL; set cookieSecure: true, or use a loopback http redirectUri for plain-HTTP local development.".to_string());
+    }
+
+    // A blank signing key is treated as absent: an empty or whitespace-only
+    // value must not become the signing material (the jar falls back to the
+    // random per-process key instead of deriving from an empty string).
+    let session_signing_key = oidc
+        .session_signing_key
+        .map(|key| key.trim().to_string())
+        .filter(|key| !key.is_empty());
+
+    Ok(AuthOidcConfig {
+        issuer: issuer.to_string(),
+        client_id: oidc.client_id.trim().to_string(),
+        client_secret: oidc.client_secret.trim().to_string(),
+        session_signing_key,
+        redirect_uri: redirect_uri.to_string(),
+        cookie_secure,
+    })
+}
+
+/// Plain `http://` is accepted only for loopback hosts (127.0.0.1, localhost,
+/// [::1]). The exception exists for the mock-IdP flow test and plain-HTTP local
+/// development, where no TLS terminator exists. Production deployments serve
+/// https, so the default stays strict.
+fn is_https_or_loopback_http(url: &Url) -> bool {
+    match url.scheme() {
+        "https" => true,
+        "http" => is_loopback_host(url.host()),
+        _ => false,
+    }
+}
+
+fn is_loopback_host(host: Option<Host<&str>>) -> bool {
+    match host {
+        Some(Host::Ipv4(ip)) => ip == Ipv4Addr::LOCALHOST,
+        Some(Host::Ipv6(ip)) => ip == Ipv6Addr::LOCALHOST,
+        Some(Host::Domain(domain)) => domain == "localhost",
+        None => false,
+    }
+}
+
+fn validate_https_url(raw: &str, field: &str) -> Result<Url, String> {
+    let parsed = Url::parse(raw)
+        .map_err(|_| format!("Configuration oidc {field} must be an absolute URL."))?;
+    if !is_https_or_loopback_http(&parsed) {
+        return Err(format!(
+            "Configuration oidc {field} must be an https URL; plain http is accepted only for the loopback hosts 127.0.0.1, localhost, and [::1]."
+        ));
+    }
+    Ok(parsed)
 }
 
 pub fn initialize_app_config(config_path: &Path) -> Result<(), String> {
@@ -241,6 +384,14 @@ fn get_app_config() -> Result<&'static AppConfig, ApiError> {
     CONFIG
         .get()
         .ok_or_else(|| ApiError::unavailable("The shared directory is unavailable."))
+}
+
+/// Read access to the validated OIDC config for the auth state initializer
+/// (backend/src/auth.rs). None when the application config was not initialized
+/// or has no `oidc` block; the missing-block startup validation lives in the
+/// auth initializer so test configs without the block can still parse.
+pub fn get_oidc_config() -> Option<&'static AuthOidcConfig> {
+    CONFIG.get().and_then(|config| config.oidc.as_ref())
 }
 
 fn validate_relative_path(input: &str) -> Result<String, ApiError> {
@@ -942,7 +1093,18 @@ pub fn app_router() -> Router {
         .route("/api/v1/health", get(health))
         .route("/api/v1/directory", get(directory))
         .route("/api/v1/download", get(download))
+        // The three auth endpoints the gate exempts: paths shared with
+        // is_public_path so the exemption and the routes stay in sync.
+        .route(crate::auth::LOGIN_PATH, get(crate::auth::login))
+        .route(crate::auth::CALLBACK_PATH, get(crate::auth::callback))
+        .route(crate::auth::LOGOUT_PATH, get(crate::auth::logout))
         .fallback(get(frontend_asset))
+        // The gate is applied AFTER the routes + fallback (Router::layer only
+        // applies to routes registered before the call) and BEFORE TraceLayer in
+        // the chain: chained layers run bottom-to-top, so TraceLayer (the last
+        // layer added) receives the request first — the span is created before
+        // the gate runs and 401/302 rejections are logged.
+        .layer(axum::middleware::from_fn(crate::auth::auth_gate))
         .layer(TraceLayer::new_for_http())
 }
 
@@ -970,7 +1132,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        ByteRange, RangeDecision, compute_weak_etag, content_disposition_value,
+        ByteRange, OidcConfigFile, RangeDecision, compute_weak_etag, content_disposition_value,
         content_response_headers, ensure_within_root, etag_matches_weakly, if_none_match_matches,
         load_app_config, modified_to_iso, open_download_target, parse_config_file,
         parse_single_byte_range, percent_decode_relative_path, percent_encode_entry_name,
@@ -1011,6 +1173,7 @@ mod tests {
             config.shared_root,
             root.canonicalize().expect("canonical root")
         );
+        assert!(config.oidc.is_none());
     }
 
     #[test]
@@ -1069,6 +1232,298 @@ mod tests {
         assert_eq!(
             error,
             "Configuration listenAddress must be a non-empty string"
+        );
+    }
+
+    /// Write a config with a valid sharedRoot plus the given raw YAML for the
+    /// nested `oidc` block.
+    fn write_oidc_config(temp: &TempDir, oidc_yaml: &str) -> PathBuf {
+        let root = temp.path().join("share");
+        fs::create_dir_all(&root).expect("create root");
+        let config_path = temp.path().join("config.yaml");
+        fs::write(
+            &config_path,
+            format!("sharedRoot: {}\n{oidc_yaml}", root.display()),
+        )
+        .expect("write config");
+        config_path
+    }
+
+    #[test]
+    fn valid_oidc_block_round_trips_through_load_app_config() {
+        let temp = TempDir::new().expect("temp dir");
+        let config_path = write_oidc_config(
+            &temp,
+            "oidc:\n  issuer: https://authentik.example.com/application/o/yafm/\n  clientId: yafm-spa\n  clientSecret: replace-me\n  sessionSigningKey: replace-signing-key\n  redirectUri: https://files.example.com/api/v1/auth/callback\n  cookieSecure: true\n",
+        );
+
+        let config = load_app_config(&config_path).expect("load config");
+        let oidc = config.oidc.as_ref().expect("oidc block parsed");
+
+        assert_eq!(
+            oidc.issuer,
+            "https://authentik.example.com/application/o/yafm/"
+        );
+        assert_eq!(oidc.client_id, "yafm-spa");
+        assert_eq!(oidc.client_secret, "replace-me");
+        assert_eq!(
+            oidc.session_signing_key,
+            Some("replace-signing-key".to_string())
+        );
+        assert_eq!(
+            oidc.redirect_uri,
+            "https://files.example.com/api/v1/auth/callback"
+        );
+        assert!(oidc.cookie_secure);
+    }
+
+    #[test]
+    fn oidc_session_signing_key_defaults_to_none_and_blank_is_treated_as_absent() {
+        // When the field is omitted the jar generates an independent random
+        // key per process; a blank value must not become the signing material.
+        let temp = TempDir::new().expect("temp dir");
+        let config_path = write_oidc_config(
+            &temp,
+            "oidc:\n  issuer: https://authentik.example.com/application/o/yafm/\n  clientId: yafm-spa\n  clientSecret: replace-me\n  redirectUri: https://files.example.com/api/v1/auth/callback\n  cookieSecure: true\n",
+        );
+
+        let config = load_app_config(&config_path).expect("load config");
+
+        assert!(
+            config
+                .oidc
+                .as_ref()
+                .expect("oidc block")
+                .session_signing_key
+                .is_none()
+        );
+
+        let blank = write_oidc_config(
+            &temp,
+            "oidc:\n  issuer: https://authentik.example.com/application/o/yafm/\n  clientId: yafm-spa\n  clientSecret: replace-me\n  sessionSigningKey: \"   \"\n  redirectUri: https://files.example.com/api/v1/auth/callback\n  cookieSecure: true\n",
+        );
+
+        let config = load_app_config(&blank).expect("load config");
+
+        assert!(
+            config
+                .oidc
+                .as_ref()
+                .expect("oidc block")
+                .session_signing_key
+                .is_none()
+        );
+    }
+
+    /// The parse-time shape holds the raw secrets between parse and validate;
+    /// its hand-written Debug impl must never leak them into logs.
+    #[test]
+    fn the_oidc_config_file_debug_output_redacts_the_secrets() {
+        let oidc = OidcConfigFile {
+            issuer: "https://authentik.example.com/application/o/yafm/".to_string(),
+            client_id: "yafm-spa".to_string(),
+            client_secret: "the-oidc-client-secret-value".to_string(),
+            session_signing_key: Some("the-signing-key-value".to_string()),
+            redirect_uri: "https://files.example.com/api/v1/auth/callback".to_string(),
+            cookie_secure: Some(true),
+        };
+        let debug_output = format!("{oidc:?}");
+
+        assert!(
+            !debug_output.contains("the-oidc-client-secret-value"),
+            "the client secret must not appear in Debug output: {debug_output}"
+        );
+        assert!(
+            !debug_output.contains("the-signing-key-value"),
+            "the signing key must not appear in Debug output: {debug_output}"
+        );
+    }
+
+    /// The full-sentence error for an https redirectUri served without the
+    /// Secure attribute: names both config fields and the fix.
+    const OIDC_COOKIE_SECURE_MISMATCH_ERROR: &str = "Configuration oidc cookieSecure must be true when redirectUri is an https URL; set cookieSecure: true, or use a loopback http redirectUri for plain-HTTP local development.";
+
+    #[test]
+    fn oidc_https_redirect_uri_refuses_cookie_secure_false_or_omitted() {
+        // Behind nginx the session cookie must carry the Secure attribute: an
+        // https redirectUri means the site is served over HTTPS. The default
+        // stays false, so the field OMITTED is refused too — a forgotten flag
+        // is the dangerous case.
+        let temp = TempDir::new().expect("temp dir");
+
+        let omitted = write_oidc_config(
+            &temp,
+            "oidc:\n  issuer: https://authentik.example.com/application/o/yafm/\n  clientId: yafm-spa\n  clientSecret: replace-me\n  redirectUri: https://files.example.com/api/v1/auth/callback\n",
+        );
+        let error = load_app_config(&omitted)
+            .expect_err("https redirectUri with cookieSecure omitted should fail");
+        assert_eq!(error, OIDC_COOKIE_SECURE_MISMATCH_ERROR);
+
+        let explicit_false = write_oidc_config(
+            &temp,
+            "oidc:\n  issuer: https://authentik.example.com/application/o/yafm/\n  clientId: yafm-spa\n  clientSecret: replace-me\n  redirectUri: https://files.example.com/api/v1/auth/callback\n  cookieSecure: false\n",
+        );
+        let error = load_app_config(&explicit_false)
+            .expect_err("https redirectUri with cookieSecure false should fail");
+        assert_eq!(error, OIDC_COOKIE_SECURE_MISMATCH_ERROR);
+    }
+
+    #[test]
+    fn oidc_https_redirect_uri_with_cookie_secure_true_passes() {
+        // The check is not over-broad: an explicit true behind https is the
+        // production shape and validates.
+        let temp = TempDir::new().expect("temp dir");
+        let config_path = write_oidc_config(
+            &temp,
+            "oidc:\n  issuer: https://authentik.example.com/application/o/yafm/\n  clientId: yafm-spa\n  clientSecret: replace-me\n  redirectUri: https://files.example.com/api/v1/auth/callback\n  cookieSecure: true\n",
+        );
+
+        let config = load_app_config(&config_path).expect("load config");
+
+        assert!(config.oidc.as_ref().expect("oidc block").cookie_secure);
+    }
+
+    #[test]
+    fn oidc_loopback_redirect_uri_with_cookie_secure_false_passes() {
+        // The loopback exception survives: the mock-IdP flow test and local
+        // development run plain http with the Secure attribute omitted.
+        let temp = TempDir::new().expect("temp dir");
+        let config_path = write_oidc_config(
+            &temp,
+            "oidc:\n  issuer: http://127.0.0.1:9000/application/o/yafm/\n  clientId: yafm-spa\n  clientSecret: replace-me\n  redirectUri: http://127.0.0.1:8080/api/v1/auth/callback\n  cookieSecure: false\n",
+        );
+
+        let config = load_app_config(&config_path).expect("load config");
+        let oidc = config.oidc.as_ref().expect("oidc block");
+
+        assert_eq!(
+            oidc.redirect_uri,
+            "http://127.0.0.1:8080/api/v1/auth/callback"
+        );
+        assert!(!oidc.cookie_secure);
+    }
+
+    #[test]
+    fn oidc_loopback_redirect_uri_with_cookie_secure_true_passes() {
+        // cookieSecure: true on a loopback http redirectUri is the harmless
+        // direction (a plain-HTTP login loop is the operator's own choice) and
+        // is not refused.
+        let temp = TempDir::new().expect("temp dir");
+        let config_path = write_oidc_config(
+            &temp,
+            "oidc:\n  issuer: http://127.0.0.1:9000/application/o/yafm/\n  clientId: yafm-spa\n  clientSecret: replace-me\n  redirectUri: http://127.0.0.1:8080/api/v1/auth/callback\n  cookieSecure: true\n",
+        );
+
+        let config = load_app_config(&config_path).expect("load config");
+
+        assert!(config.oidc.as_ref().expect("oidc block").cookie_secure);
+    }
+
+    #[test]
+    fn oidc_issuer_must_be_an_absolute_https_url() {
+        let temp = TempDir::new().expect("temp dir");
+
+        let relative = write_oidc_config(
+            &temp,
+            "oidc:\n  issuer: authentik.example.com/application/o/yafm/\n  clientId: yafm-spa\n  clientSecret: replace-me\n  redirectUri: https://files.example.com/api/v1/auth/callback\n",
+        );
+        let error = load_app_config(&relative).expect_err("relative issuer should fail");
+        assert_eq!(error, "Configuration oidc issuer must be an absolute URL.");
+
+        let plain_http = write_oidc_config(
+            &temp,
+            "oidc:\n  issuer: http://authentik.example.com/application/o/yafm/\n  clientId: yafm-spa\n  clientSecret: replace-me\n  redirectUri: https://files.example.com/api/v1/auth/callback\n",
+        );
+        let error = load_app_config(&plain_http).expect_err("non-loopback http issuer should fail");
+        assert_eq!(
+            error,
+            "Configuration oidc issuer must be an https URL; plain http is accepted only for the loopback hosts 127.0.0.1, localhost, and [::1]."
+        );
+    }
+
+    #[test]
+    fn oidc_issuer_accepts_plain_http_only_for_loopback_hosts() {
+        // The loopback exception exists for the mock-IdP flow test and local
+        // development; each loopback host round-trips through the validation.
+        let temp = TempDir::new().expect("temp dir");
+        for issuer in [
+            "http://127.0.0.1:9000/application/o/yafm/",
+            "http://localhost:9000/application/o/yafm/",
+            "http://[::1]:9000/application/o/yafm/",
+        ] {
+            let config_path = write_oidc_config(
+                &temp,
+                &format!(
+                    "oidc:\n  issuer: {issuer}\n  clientId: yafm-spa\n  clientSecret: replace-me\n  redirectUri: https://files.example.com/api/v1/auth/callback\n  cookieSecure: true\n"
+                ),
+            );
+
+            let config =
+                load_app_config(&config_path).expect("loopback http issuer should be accepted");
+
+            assert_eq!(config.oidc.as_ref().expect("oidc block").issuer, issuer);
+        }
+    }
+
+    #[test]
+    fn oidc_client_credentials_must_be_non_blank() {
+        let temp = TempDir::new().expect("temp dir");
+
+        let blank_client_id = write_oidc_config(
+            &temp,
+            "oidc:\n  issuer: https://authentik.example.com/application/o/yafm/\n  clientId: \"   \"\n  clientSecret: replace-me\n  redirectUri: https://files.example.com/api/v1/auth/callback\n",
+        );
+        let error = load_app_config(&blank_client_id).expect_err("blank clientId should fail");
+        assert_eq!(
+            error,
+            "Configuration oidc clientId must be a non-empty string."
+        );
+
+        let blank_secret = write_oidc_config(
+            &temp,
+            "oidc:\n  issuer: https://authentik.example.com/application/o/yafm/\n  clientId: yafm-spa\n  clientSecret: \"\"\n  redirectUri: https://files.example.com/api/v1/auth/callback\n",
+        );
+        let error = load_app_config(&blank_secret).expect_err("blank clientSecret should fail");
+        assert_eq!(
+            error,
+            "Configuration oidc clientSecret must be a non-empty string."
+        );
+    }
+
+    #[test]
+    fn oidc_redirect_uri_must_point_at_the_callback_path() {
+        let temp = TempDir::new().expect("temp dir");
+
+        // The backend serves the site directly, so a redirectUri on another path
+        // is a misconfiguration and is caught at startup.
+        let wrong_path = write_oidc_config(
+            &temp,
+            "oidc:\n  issuer: https://authentik.example.com/application/o/yafm/\n  clientId: yafm-spa\n  clientSecret: replace-me\n  redirectUri: https://files.example.com/elsewhere\n",
+        );
+        let error = load_app_config(&wrong_path).expect_err("mismatched path should fail");
+        assert_eq!(
+            error,
+            "Configuration oidc redirectUri path must be \"/api/v1/auth/callback\"; the backend serves the site directly."
+        );
+
+        // A trailing slash is a different path, not the callback.
+        let trailing_slash = write_oidc_config(
+            &temp,
+            "oidc:\n  issuer: https://authentik.example.com/application/o/yafm/\n  clientId: yafm-spa\n  clientSecret: replace-me\n  redirectUri: https://files.example.com/api/v1/auth/callback/\n",
+        );
+        let error = load_app_config(&trailing_slash).expect_err("trailing slash should fail");
+        assert!(error.contains("/api/v1/auth/callback"));
+
+        // The redirectUri follows the same https rule as the issuer.
+        let plain_http = write_oidc_config(
+            &temp,
+            "oidc:\n  issuer: https://authentik.example.com/application/o/yafm/\n  clientId: yafm-spa\n  clientSecret: replace-me\n  redirectUri: http://files.example.com/api/v1/auth/callback\n",
+        );
+        let error =
+            load_app_config(&plain_http).expect_err("non-loopback http redirectUri should fail");
+        assert_eq!(
+            error,
+            "Configuration oidc redirectUri must be an https URL; plain http is accepted only for the loopback hosts 127.0.0.1, localhost, and [::1]."
         );
     }
 

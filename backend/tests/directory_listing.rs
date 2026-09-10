@@ -50,6 +50,9 @@ fn fixture() -> &'static TempDir {
 async fn initialize() -> &'static TempDir {
     let temp = fixture();
     backend::initialize_app_config(&fixture_config_path(temp)).expect("initialize app config");
+    // The gate fails closed on uninitialized auth state; the test-only
+    // Disabled state preserves this binary's path-safety coverage.
+    backend::initialize_auth_disabled_for_tests();
     temp
 }
 
