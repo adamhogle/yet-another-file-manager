@@ -1,4 +1,4 @@
-# Feature Spec: Git-Height Versioning
+# Feature Spec: CalVer Git-Height Versioning
 
 ## Summary
 
@@ -15,7 +15,7 @@ As a maintainer, I want one manually managed base version with automatically der
 ## Scope
 
 - In scope: add a single repo-level base version file.
-- In scope: compute a full semver-compatible version using git height since the last base-version bump.
+- In scope: compute a full CalVer `YYYY.MM.N` version using git height since the last base-version bump.
 - In scope: expose the computed version through a script usable by CI.
 - In scope: align existing manifest versions to the new base release line.
 - In scope: document the versioning model for future image publishing.
@@ -28,9 +28,9 @@ As a maintainer, I want one manually managed base version with automatically der
 
 ## UX / Flow
 
-- Maintainer updates the repo version file when changing the major or minor release line.
+- Maintainer updates the repo version file when changing the year and month release line.
 - CI computes the effective build version from the base version file plus git height.
-- Future image publishing can reuse the computed semver tag, SHA tag, and `latest` on `main`.
+- Future image publishing can reuse the computed CalVer tag, SHA tag, and `latest` on `main`.
 
 ## Technical Notes
 
@@ -48,8 +48,9 @@ As a maintainer, I want one manually managed base version with automatically der
 ## Acceptance Criteria
 
 - [x] A single repo-level base version file exists and is documented.
-- [x] A script can output the computed semver version and Docker-safe tags for the current commit.
+- [x] A script can output the computed CalVer version and Docker-safe tags for the current commit.
 - [x] CI uses the version script so future publish steps can consume consistent outputs.
+- [ ] version.json stores {year, month} and the computed version is `YYYY.MM.N` with a zero-padded month.
 - [x] Existing package manifests no longer disagree on the project release line.
 - [x] Focused automated tests cover the version calculation logic.
 
@@ -61,4 +62,4 @@ As a maintainer, I want one manually managed base version with automatically der
 
 ## Open Questions
 
-- Whether release tags should later override computed versions on tagged commits can be added in a follow-up.
+- Whether release tags should later override computed versions on tagged commits remains a follow-up.

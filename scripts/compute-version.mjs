@@ -8,21 +8,21 @@ const execFile = promisify(execFileCallback);
 const VERSION_FILE = 'version.json';
 
 export function parseVersionConfig(rawConfig) {
-  const major = rawConfig?.major;
-  const minor = rawConfig?.minor;
+  const year = rawConfig?.year;
+  const month = rawConfig?.month;
 
-  if (!Number.isInteger(major) || major < 0) {
-    throw new Error('version.json major must be a non-negative integer');
+  if (!Number.isInteger(year) || year < 0) {
+    throw new Error('version.json year must be a non-negative integer');
   }
 
-  if (!Number.isInteger(minor) || minor < 0) {
-    throw new Error('version.json minor must be a non-negative integer');
+  if (!Number.isInteger(month) || month < 1 || month > 12) {
+    throw new Error('version.json month must be an integer between 1 and 12');
   }
 
-  return { major, minor };
+  return { year, month };
 }
 
-export function buildVersionInfo({ major, minor, patch, shortSha, branch }) {
+export function buildVersionInfo({ year, month, patch, shortSha, branch }) {
   if (!Number.isInteger(patch) || patch < 0) {
     throw new Error('patch must be a non-negative integer');
   }
@@ -31,7 +31,8 @@ export function buildVersionInfo({ major, minor, patch, shortSha, branch }) {
     throw new Error('shortSha is required');
   }
 
-  const version = `${major}.${minor}.${patch}`;
+  const monthPadded = String(month).padStart(2, '0');
+  const version = `${year}.${monthPadded}.${patch}`;
   const shaTag = `sha-${shortSha}`;
   const latestTag = branch === 'main' ? 'latest' : '';
 
@@ -39,11 +40,11 @@ export function buildVersionInfo({ major, minor, patch, shortSha, branch }) {
     branch,
     imageVersion: version,
     latestTag,
-    major,
-    minor,
+    year,
+    month,
     patch,
-    releaseLine: `${major}.${minor}`,
-    releaseVersion: `${major}.${minor}.0`,
+    releaseLine: `${year}.${monthPadded}`,
+    releaseVersion: `${year}.${monthPadded}.0`,
     sha: shortSha,
     shaTag,
     version
@@ -71,7 +72,7 @@ async function runGit(args, cwd) {
 export async function resolveVersionInfo({ root = process.cwd(), git = runGit } = {}) {
   const versionFilePath = path.join(root, VERSION_FILE);
   const rawVersionConfig = JSON.parse(await fs.readFile(versionFilePath, 'utf8'));
-  const { major, minor } = parseVersionConfig(rawVersionConfig);
+  const { year, month } = parseVersionConfig(rawVersionConfig);
 
   const [lastVersionCommit, shortSha, detectedBranch] = await Promise.all([
     git(['log', '-n', '1', '--format=%H', '--', VERSION_FILE], root),
@@ -86,8 +87,8 @@ export async function resolveVersionInfo({ root = process.cwd(), git = runGit } 
     : 0;
 
   return buildVersionInfo({
-    major,
-    minor,
+    year,
+    month,
     patch,
     shortSha,
     branch: detectedBranch

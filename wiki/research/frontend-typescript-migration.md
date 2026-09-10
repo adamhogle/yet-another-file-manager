@@ -4,7 +4,7 @@
 **Date:** 2026-09-05
 **Repo:** /workspaces/yet-another-file-manager
 **Used by:** [wiki/plans/frontend-typescript.md](../plans/frontend-typescript.md) (the plan page — decisions recorded there as they were made)
-**Prior work:** the 2026-09-04 repo-health run at `.pi/plans/2026-09-04-repo-health/` (legacy, untracked) — that plan explicitly parked this migration; see [Parked decision](#parked-decision-un-parked-here).
+**Prior work:** the 2026-09-04 repo-health run (internal planning directory, not in the public repo) — that plan explicitly parked this migration; see [Parked decision](#parked-decision-un-parked-here).
 
 All facts below are verified against the working tree at SHA-ish `2026-09-05`
 state unless marked otherwise.
@@ -35,13 +35,13 @@ state unless marked otherwise.
   `tests/**/*.{test,spec}.{js,ts}` — TS tests are picked up with no config
   change; vitest transpiles TS through its own vite pipeline, no extra dep.
 - `.prettierrc`: 2-space indent, singleQuote true, no trailing commas,
-  printWidth 100. `.prettierignore`: package locks, `/static/`, `.pi/`,
+  printWidth 100. `.prettierignore`: package locks, `/static/`, and internal/untracked directories,
   `backend/` (rustfmt-owned). Everything else — including a new `wiki/` — is
   prettier scope.
 
 ## Parked decision (un-parked here)
 
-`.pi/plans/2026-09-04-repo-health/plan.md:49` lists under Out of Scope:
+The repo-health plan (internal planning directory, not in the public repo) lists under Out of Scope:
 "TypeScript migration of the frontend (parked; docs will stop claiming a
 typecheck exists)" — repeated as a parked open question at plan.md:161. The
 repo-health run's T17 fix corrected `docs/features/` to say "no frontend

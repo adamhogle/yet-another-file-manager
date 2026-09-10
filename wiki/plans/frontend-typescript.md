@@ -3,7 +3,7 @@
 **Status:** Done
 **Date:** 2026-09-05
 **Repo:** /workspaces/yet-another-file-manager
-**Draws from:** [Frontend TypeScript + ESLint migration research](../research/frontend-typescript-migration.md) — the scout's findings page (current state, App.vue anatomy, tooling registry facts, verified prettier-in-pipeline probe, docs drift, planner gotchas). The 2026-09-04 repo-health run at `.pi/plans/2026-09-04-repo-health/` (legacy, untracked) parked this migration (plan.md:49, 161) and documents repo standards (prettier CI gate, spec-first feature work, ADRs for architecture changes, generated files are AUTO-GENERATED DO NOT EDIT).
+**Draws from:** [Frontend TypeScript + ESLint migration research](../research/frontend-typescript-migration.md) — the scout's findings page (current state, App.vue anatomy, tooling registry facts, verified prettier-in-pipeline probe, docs drift, planner gotchas). The 2026-09-04 repo-health run (internal planning directory, not in the public repo) parked this migration (plan.md:49, 161) and documents repo standards (prettier CI gate, spec-first feature work, ADRs for architecture changes, generated files are AUTO-GENERATED DO NOT EDIT).
 **Completed:** 2026-09-05 — every ISC verified at the T7 gate (check/lint/tests/contract green in-session, contract chain idempotent, CI workflow untouched); T1–T6 landed through `c9aea74`, plus the T7 flip.
 
 ## Intent

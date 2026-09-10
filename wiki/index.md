@@ -1,9 +1,7 @@
 # Wiki
 
 Durable knowledge base for Yet Another File Manager. Each page records verified
-findings or decisions that outlive a single session. Planning artifacts that
-predate the wiki live under `.pi/plans/` (untracked legacy artifacts; `.pi/`
-stays as-is — the wiki is the new home going forward).
+findings or decisions that outlive a single session.
 
 ## Pages
 
@@ -14,6 +12,27 @@ stays as-is — the wiki is the new home going forward).
 
 ## Prior Runs (legacy artifacts)
 
-- [Repo health: prioritized fix plan](../.pi/plans/2026-09-04-repo-health/plan.md) — 2026-09-04 repo-health sweep (23 audit issues fixed in 6 waves). Explicitly parked the frontend TypeScript migration (plan.md:49) and corrected docs to say "lint + build" instead of a typecheck — this wiki's migration research un-parks that decision. Full scout context at [.pi/plans/2026-09-04-repo-health/scout-context.md](../.pi/plans/2026-09-04-repo-health/scout-context.md).
-- [Plan: OIDC authentication with authentik](../.pi/plans/2026-09-06-oidc/plan.md) — 2026-09-06 OIDC plan: all-or-nothing server-side auth gate on every endpoint (401 JSON for `/api/*`, 302 for browser navigations), signed session cookies, login/callback/logout endpoints, the explicit gate-enumeration test plus a mock-IdP end-to-end flow test, and the debug-gated `YAFM_DISABLE_AUTH` test backdoor. Feature spec at [docs/features/oidc-authentication.md](../docs/features/oidc-authentication.md), ADR at [docs/architecture/0004-oidc-authentication.md](../docs/architecture/0004-oidc-authentication.md). Full scout context at [.pi/plans/2026-09-06-oidc/scout-context.md](../.pi/plans/2026-09-06-oidc/scout-context.md).
-- [Plan: security hardening per the 2026-09-07 review](../.pi/plans/2026-09-07-security-hardening/plan.md) — 2026-09-07 security-hardening run: fixed M1 (connect and total timeouts on the OIDC HTTP client, verified empirically — a stalled issuer surfaces the 503 in ~30s instead of hanging), M2 (independent cookie signing key via the optional `oidc.sessionSigningKey` field with a per-process random fallback, plus redacted `Debug` impls on the config structs), and L4 (refuse-to-start check for an https `redirectUri` paired with `cookieSecure` false or omitted); documented M3 (hard links → read-only dedicated volume mount), L5 (logout CSRF), L6 (no audit trail — v2 follow-up), L7 (health probes at the proxy layer), L8 (nginx `limit_req`), and the full deployment expectations in the README's [Deployment](../README.md#deployment) section. ADR-0004 Decision item 3 amended (Status stays Accepted). Full scout context at [.pi/plans/2026-09-07-security-hardening/scout-context.md](../.pi/plans/2026-09-07-security-hardening/scout-context.md).
+- Repo health: prioritized fix plan (2026-09-04 repo-health sweep, 23 audit issues
+  fixed in 6 waves). Explicitly parked the frontend TypeScript migration
+  (plan.md:49) and corrected docs to say "lint + build" instead of a typecheck,
+  which this wiki's migration research un-parks.
+- Plan: OIDC authentication with authentik (2026-09-06 OIDC plan): all-or-nothing
+  server-side auth gate on every endpoint (401 JSON for `/api/*`, 302 for browser
+  navigations), signed session cookies, login/callback/logout endpoints, the
+  explicit gate-enumeration test plus a mock-IdP end-to-end flow test, and the
+  debug-gated `YAFM_DISABLE_AUTH` test backdoor. Feature spec at
+  [docs/features/oidc-authentication.md](../docs/features/oidc-authentication.md),
+  ADR at
+  [docs/architecture/0004-oidc-authentication.md](../docs/architecture/0004-oidc-authentication.md).
+- Plan: security hardening per the 2026-09-07 review (2026-09-07
+  security-hardening run): fixed M1 (connect and total timeouts on the OIDC HTTP
+  client, verified empirically, a stalled issuer surfaces the 503 in ~30s instead
+  of hanging), M2 (independent cookie signing key via the optional
+  `oidc.sessionSigningKey` field with a per-process random fallback, plus redacted
+  `Debug` impls on the config structs), and L4 (refuse-to-start check for an
+  https `redirectUri` paired with `cookieSecure` false or omitted); documented M3
+  (hard links → read-only dedicated volume mount), L5 (logout CSRF), L6 (no audit
+  trail, v2 follow-up), L7 (health probes at the proxy layer), L8 (nginx
+  `limit_req`), and the full deployment expectations in the README's
+  [Deployment](../README.md#deployment) section. ADR-0004 Decision item 3 amended
+  (Status stays Accepted).

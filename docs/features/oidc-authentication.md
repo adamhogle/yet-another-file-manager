@@ -9,13 +9,13 @@ Done (2026-09-07)
 OIDC authentication with authentik as the identity provider: the site redirects the
 browser to authentik for login, the backend exchanges the authorization code
 server-to-server, and the resulting authenticated session is enforced on every
-endpoint. All-or-nothing access — no per-user permissions in v1.
+endpoint. All-or-nothing access, no per-user permissions in v1.
 
 ## Problem Statement
 
 The backend currently serves every endpoint to any caller: directory listings,
 downloads, and the health probe are all public. For a self-hosted file manager that is
-accidental data disclosure — anyone who can reach the port can browse and download the
+accidental data disclosure: anyone who can reach the port can browse and download the
 shared root. The requirement is actual OIDC integration: the site redirects for login,
 that authentication is used on the endpoint, and all endpoints are secured by auth
 checks as a hard requirement that is verified to prevent accidental data disclosure.
@@ -32,7 +32,7 @@ listings, downloads, health, SPA assets) only serves data to authenticated reque
 
 ## Scope
 
-- In scope: OIDC authorization-code flow (confidential client) against authentik —
+- In scope: OIDC authorization-code flow (confidential client) against authentik,
   login, callback, and logout endpoints with state + nonce + PKCE (S256) and ID token
   validation via the discovered JWKS.
 - In scope: a server-side auth gate wrapping every route + fallback, path-based: 401
@@ -45,12 +45,12 @@ listings, downloads, health, SPA assets) only serves data to authenticated reque
 - In scope: a stateless signed session cookie (no server-side store; fits the
   single-binary stateless deployment).
 - In scope: frontend 401 auto-recovery (probe-on-error in the wrapper client).
-- In scope: test backdoors — a test-only auth-disabled state (Rust tests) and a
+- In scope: test backdoors, a test-only auth-disabled state (Rust tests) and a
   debug-assertions-gated `YAFM_DISABLE_AUTH` env var (vitest integration spec).
 
 ## Non-Goals
 
-- Not in scope: per-user permissions, group claims, or role checks — all-or-nothing
+- Not in scope: per-user permissions, group claims, or role checks, all-or-nothing
   only (explicit user boundary).
 - Not in scope: refresh tokens / `offline_access` scope (authentik SSO makes re-login
   an instant redirect; revisit if the session TTL proves too short).
@@ -59,7 +59,7 @@ listings, downloads, health, SPA assets) only serves data to authenticated reque
   as today).
 - Not in scope: sub-path/proxy-prefix deployment support (the backend serves `/`
   directly).
-- Not in scope: changes to the OpenAPI contract chain — the auth endpoints are
+- Not in scope: changes to the OpenAPI contract chain, the auth endpoints are
   browser-flow endpoints (302 redirects, no JSON bodies) and are deliberately excluded
   from `ApiDoc`; `openapi.yaml` and the generated client stay untouched.
 
@@ -95,7 +95,7 @@ redirecting the browser to login.
 
 Failure modes:
 
-- Uninitialized auth state: the gate fails closed with 503 — it never serves data.
+- Uninitialized auth state: the gate fails closed with 503; it never serves data.
 - Garbage, forged, or expired session cookie: rejected as unauthenticated (401 for
   `/api/*`, 302 for non-API paths) without a panic.
 - Missing or incomplete `oidc` config block: startup aborts with a clear
@@ -126,7 +126,7 @@ Failure modes:
   state + nonce + PKCE verifier + `returnTo`. The signing key is independent of the
   OIDC client secret: the optional `oidc.sessionSigningKey` config value (SHA-256-
   expanded to the `cookie` crate's master key length) or, when omitted, a random
-  `cookie::Key::generate()` per process — every restart without a configured key
+  `cookie::Key::generate()` per process, every restart without a configured key
   invalidates outstanding sessions (SSO re-login is an instant redirect). The client
   secret alone can no longer mint valid sessions; rotating the key invalidates every
   outstanding session.
@@ -135,11 +135,11 @@ Failure modes:
 - Auth is mandatory via config; the only test backdoor is the debug-gated
   `YAFM_DISABLE_AUTH=1` env var, honored only in development builds (`cfg!(debug_assertions)`;
   the Dockerfile builds `--release`, so production can never run open).
-- The health endpoint is authenticated — nothing in the Dockerfile, CI, or scripts
+- The health endpoint is authenticated; nothing in the Dockerfile, CI, or scripts
   depends on health being public.
 - The hard requirement (all endpoints secured) is verified explicitly by a
   gate-enumeration test asserting unauthenticated requests to every endpoint are
-  rejected (401 for `/api/*`, 302 to login for non-API paths) — not by config
+  rejected (401 for `/api/*`, 302 to login for non-API paths), not by config
   defaults.
 - The gate fails closed (503) when auth state is uninitialized.
 - `returnTo` open-redirect protection: it must be a same-origin relative path (starts
@@ -160,11 +160,11 @@ Failure modes:
   `email_verified` is not validated (authentik defaults it to false since 2025.10).
 - Error responses never leak host paths or upstream details; an OAuth `error`
   parameter at the callback produces a safe 401.
-- No per-user permission logic anywhere — all-or-nothing only.
+- No per-user permission logic anywhere; all-or-nothing only.
 - `returnTo` is validated as a same-origin relative path (starts with `/`, not `//`);
   anything else falls back to `/`, preventing open redirects.
 - Logout CSRF is a documented residual risk: the GET logout endpoint is reachable by
-  a cross-site top-level navigation (SameSite=Lax sends cookies on top-level GETs) —
+  a cross-site top-level navigation (SameSite=Lax sends cookies on top-level GETs),
   pure nuisance, no data exposure; a POST change would break the plain `<a href>`
   logout in the hybrid gate.
 - No audit trail and no per-user revocation: the session payload carries only a
@@ -173,8 +173,8 @@ Failure modes:
 
 ## Acceptance Criteria
 
-- [ ] Unauthenticated requests to every endpoint are rejected — 401 for `/api/*`, 302
-      to login for non-API paths — asserted by an explicit test enumerating all paths.
+- [ ] Unauthenticated requests to every endpoint are rejected, 401 for `/api/*`, 302
+      to login for non-API paths, asserted by an explicit test enumerating all paths.
 - [ ] Login 302s the browser to the authentik authorization endpoint with a signed
       state + nonce + PKCE cookie set.
 - [ ] Callback validates state + nonce, exchanges the code, and validates the ID
@@ -192,7 +192,7 @@ Failure modes:
 - [ ] `returnTo` open-redirect protection: non-same-origin values fall back to `/`.
 - [ ] Callback with an OAuth `error` parameter returns a safe 401 without leaking
       details.
-- [ ] The runtime TLS stack is rustls-based — `cargo tree -e normal -i openssl-sys`
+- [ ] The runtime TLS stack is rustls-based, `cargo tree -e normal -i openssl-sys`
       (and curl-sys) report nothing.
 
 ## Test Plan
@@ -201,7 +201,7 @@ Failure modes:
   garbage input); gate behavior per state (disabled pass-through, uninitialized 503,
   unauthenticated 401 for `/api/*` and 302 for non-API paths, valid minted cookie
   pass-through); `returnTo` validation; exempt-path handling.
-- Integration: `backend/tests/auth_gate.rs` — the explicit enumeration of every
+- Integration: `backend/tests/auth_gate.rs`, the explicit enumeration of every
   endpoint asserting unauthenticated rejection (401 for `/api/*`, 302 to login for
   non-API paths), forged/garbage session cookies, and a valid minted session granting
   access to every endpoint.
@@ -219,23 +219,23 @@ Failure modes:
 
 ## Validation Evidence
 
-- `cargo fmt --check` and `cargo clippy -- -D warnings` (backend/) — clean.
-- `cargo test` (backend/) — every test binary passes: 59 lib tests, 3 main.rs, 3
+- `cargo fmt --check` and `cargo clippy -- -D warnings` (backend/), clean.
+- `cargo test` (backend/), every test binary passes: 59 lib tests, 3 main.rs, 3
   api_contract, 6 auth_gate (the explicit gate-enumeration and fail-closed
   enumeration), 3 directory_listing, 1 streaming_download, 1 symlink_escape, 1
   utf8_entry_names, and 1 oidc_flow (the mock-IdP full loop). Total 78 tests, 0
   failed.
-- `cargo deny --manifest-path backend/Cargo.toml check` — advisories, bans,
+- `cargo deny --manifest-path backend/Cargo.toml check`, advisories, bans,
   licenses, sources all ok.
-- `cargo tree -e normal -i openssl-sys` and `-i curl-sys` — nothing (the runtime
+- `cargo tree -e normal -i openssl-sys` and `-i curl-sys`, nothing (the runtime
   TLS stack is rustls-only).
-- `vue-tsc --noEmit`, eslint, and prettier `--check .` — clean.
+- `vue-tsc --noEmit`, eslint, and prettier `--check .`, clean.
 - Vitest: 19 tests across 4 files pass, including
   `tests/generated-client.integration.spec.ts`: the spawned backend carries the
   `YAFM_DISABLE_AUTH: '1'` spawn flag and serves health 200 under the test-only
   Disabled state (auth is mandatory via config, so the flag is the only way the
   spec's no-oidc-block config starts).
-- `vite build` + `copy-public.mjs` — the production frontend bundle builds and
+- `vite build` + `copy-public.mjs`, the production frontend bundle builds and
   copies the public assets.
-- `contract:generate` + `contract:check` — idempotent, no drift (the OpenAPI
+- `contract:generate` + `contract:check`, idempotent, no drift (the OpenAPI
   contract and the generated client are untouched by this feature).

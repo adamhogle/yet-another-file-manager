@@ -1,0 +1,13 @@
+# Gitleaks configuration for Yet Another File Manager.
+#
+# The two RSA private keys in backend/tests/oidc_flow.rs are throwaway test
+# keys generated once for the mock identity provider (the file documents
+# them). They are not secrets, so scanning them would only produce noise.
+
+[extend]
+useDefault = true
+
+[allowlist]
+paths = [
+  '''backend/tests/oidc_flow.rs'''
+]

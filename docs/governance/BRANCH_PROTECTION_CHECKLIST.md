@@ -19,6 +19,8 @@ Use this checklist when configuring branch protection for `main`.
 Configure these required checks to match `.github/workflows/ci.yml`:
 
 - [ ] `quality`
+- [ ] `secret-scan`
+- [ ] `docker-image`
 
 ## Optional Hardening
 

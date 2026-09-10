@@ -76,7 +76,7 @@ Follow-up work:
   escapes; the narrower canonicalize-to-stat window remains (openat2 with
   RESOLVE_IN_ROOT is the future full fix).
 - Opening a named pipe (FIFO) planted in the share blocks a tokio blocking-pool thread
-  until a writer appears — a request-per-thread DoS under a writable share. The
+  until a writer appears, a request-per-thread DoS under a writable share. The
   regular-file check runs after the open, so it does not prevent the block. As with
   the canonicalize-to-stat window, `openat2` with `RESOLVE_IN_ROOT` is the future full
   fix and the documented read-only shared-root mount is the deployment mitigation.

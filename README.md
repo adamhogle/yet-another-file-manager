@@ -1,23 +1,27 @@
 # Yet Another File Manager
 
+![Yet Another File Manager](frontend/public/yafm-logo.svg)
+
+[![CI](https://github.com/adamhogle/yet-another-file-manager/actions/workflows/ci.yml/badge.svg)](https://github.com/adamhogle/yet-another-file-manager/actions/workflows/ci.yml)
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0--only-blue)](https://www.gnu.org/licenses/agpl-3.0.txt)
+
 A web-based file manager for self-hosted local file sharing, built with a Rust backend and Vue frontend.
 
-## Runtime Requirements
+## Runtime requirements
 
 - Linux container runtime only (Docker deployment target)
 - Windows host/container runtime is not supported
 
-## Status
+## Features
 
-Current baseline includes:
-
-- Rust backend API with embedded frontend static assets
-- Vue frontend application
-- OpenAPI generation from Rust endpoints and generated frontend API client
-- Contract drift checks in CI
-- Cargo tests plus frontend integration tests via Vitest
-- Initial governance and CI workflows
-- Copilot repo customizations for consistent AI-assisted development
+- Rust backend with the Vue frontend embedded in the binary.
+- Directory listing and streaming downloads with Range and ETag support.
+- Path traversal and symlink escape protection, verified by tests.
+- OIDC authentication (authentik tested) with signed session cookies applied
+  to every route, including static assets.
+- OpenAPI contract generated from Rust types, with a generated TypeScript
+  client and a CI drift check.
+- Build, test, lint, and Docker image publishing in CI.
 
 ## Quickstart
 
@@ -33,9 +37,9 @@ npm run dev
 ```
 
 The example config enables OIDC authentication. Developing without an identity provider
-needs the test-only `YAFM_DISABLE_AUTH=1` flag — see [Authentication](#authentication).
+needs the test-only `YAFM_DISABLE_AUTH=1` flag, see [Authentication](#authentication).
 
-## Runtime Configuration
+## Runtime configuration
 
 The backend expects a YAML or JSON runtime config file.
 
@@ -47,7 +51,7 @@ Configuration fields:
 
 - `sharedRoot` (required): absolute directory path to expose
 - `showHidden` (optional): include hidden entries in listings. This is a LISTING
-  filter, not an access control — hidden entries are still served on direct
+  filter, not an access control; hidden entries are still served on direct
   download (`/api/v1/download?p=.env` succeeds for an authenticated user who
   knows the name). Do not rely on it to protect secrets; keep sensitive files
   out of the shared root.
@@ -64,10 +68,10 @@ Configuration fields:
   cookie; when omitted, a random key is generated per process and every restart
   invalidates outstanding sessions. Generate a stable key with `openssl rand -base64 32`;
   a configured key shorter than 32 bytes is refused at startup. The OIDC client secret
-  must NOT be used here — the client secret alone would be enough to mint valid sessions.
+  must NOT be used here, the client secret alone would be enough to mint valid sessions.
 - `oidc.redirectUri` (required): absolute https URL whose path is exactly
   `/api/v1/auth/callback`
-- `oidc.cookieSecure` (optional, default `false`): must be `true` when `redirectUri` is https —
+- `oidc.cookieSecure` (optional, default `false`): must be `true` when `redirectUri` is https,
   startup refuses the mismatch. Set `false` explicitly only with a loopback http `redirectUri`
   for plain-HTTP local development.
 
@@ -75,7 +79,7 @@ Configuration fields:
 
 Authentication is mandatory via config: the backend refuses to start without the `oidc`
 block. Every endpoint (directory listings, downloads, health, SPA assets) is gated
-server-side — unauthenticated `/api/*` requests get a 401 JSON error, and unauthenticated
+server-side, unauthenticated `/api/*` requests get a 401 JSON error, and unauthenticated
 browser navigations redirect through the login flow. The trust-boundary decision is
 recorded in `docs/architecture/0004-oidc-authentication.md`.
 
@@ -84,7 +88,7 @@ recorded in `docs/architecture/0004-oidc-authentication.md`.
 Create an OIDC provider application for the file manager (a confidential client with the
 client id and secret the backend gets from the `oidc` config block):
 
-- Register the redirect URI `https://<public-origin>/api/v1/auth/callback` — the path
+- Register the redirect URI `https://<public-origin>/api/v1/auth/callback`, the path
   must be exactly `/api/v1/auth/callback`.
 - The issuer comes from the provider's `.well-known/openid-configuration` document.
   Authentik's default issuer mode is per-provider:
@@ -109,7 +113,7 @@ authentik.
 
 Local development without an identity provider uses the test-only flag
 `YAFM_DISABLE_AUTH=1`, honored only by development builds (`cfg!(debug_assertions)`;
-`cargo run` is a debug build — release builds ignore the flag and always require the
+`cargo run` is a debug build, release builds ignore the flag and always require the
 `oidc` block):
 
 ```sh
@@ -135,20 +139,26 @@ npm run version:print     # Resolve repo version from version.json + git height
 
 ## Versioning
 
-The repository uses a single base version file at `version.json`.
+The repository uses calendar versioning: `YYYY.MM.N`, where `YYYY.MM` is the
+release line stored in `version.json` and `N` is the git commit count since the
+last change to `version.json`.
 
-- `major` and `minor` are changed manually.
-- `patch` is derived from the git commit height since the last change to `version.json`.
-- `npm run version:print` shows the resolved build version for the current commit.
-- `node scripts/compute-version.mjs --plain` prints only the computed version, and `--release` prints the release-line version (`major.minor.0`).
-- The OpenAPI contract version in `api/openapi.yaml` is derived from `version.json`'s release line by the `openapi:generate` script.
+- Bump `version.json` when you start a new month's release line (it resets the
+  commit counter).
+- `npm run version:print` shows the resolved build version for the current
+  commit. `--plain` prints just the version, `--release` prints the release
+  line version (`YYYY.MM.0`).
+- The OpenAPI contract version in `api/openapi.yaml` is derived from the
+  release line by `openapi:generate`.
 
-This version source is intended to drive future Docker image tags and release automation.
+Docker images use `YYYY.MM.N` tags, the `YYYY.MM` release line, a `sha-<sha>`
+tag, and `latest` on main. Releases are tagged `vYYYY.MM.N` and published by
+the Release workflow.
 
 ## Deployment
 
-The backend is deployed behind a TLS-terminating reverse proxy — nginx in the reference
-deployment — with authentik as the identity provider. Operators deploying behind nginx +
+The backend is deployed behind a TLS-terminating reverse proxy (nginx in the reference
+deployment) with authentik as the identity provider. Operators deploying behind nginx +
 authentik should have no surprises; the expectations:
 
 - **Serve the site at the domain root.** There is no sub-path/proxy-prefix support;
@@ -156,7 +166,7 @@ authentik should have no surprises; the expectations:
   by design.
 - **TLS at the proxy.** nginx terminates TLS and the backend serves plain HTTP; the
   backend trusts no `Host`/`X-Forwarded-*` headers, so header spoofing buys an attacker
-  nothing — keep it that way.
+  nothing; keep it that way.
 - **`cookieSecure: true` behind HTTPS.** Startup refuses an https `redirectUri` paired
   with `cookieSecure: false` (a startup consistency check). Local development sets
   `false` explicitly with a loopback `redirectUri`.
@@ -169,7 +179,7 @@ authentik should have no surprises; the expectations:
 - **Rate limiting at the proxy.** Put `limit_req` on `/api/v1/auth/` plus a sane global
   request limit: the auth endpoints are public and cheap to hammer (login mints a
   cookie and redirects on every hit), and a downed authentik plus no client timeout
-  used to turn every login into a hanging call — the backend's OIDC connect and
+  used to turn every login into a hanging call, the backend's OIDC connect and
   request timeouts now bound it. A sketch:
 
   ```nginx
@@ -201,7 +211,7 @@ authentik should have no surprises; the expectations:
   filesystems into it. This closes the hard-link path (the Docker run already mounts
   `:ro`; the dedicated-volume part is the additive note). Mounting read-only also
   prevents a named pipe (FIFO) planted in the share from blocking a download request's
-  tokio blocking-pool thread until a writer appears — a request-per-thread DoS under
+  tokio blocking-pool thread until a writer appears, a request-per-thread DoS under
   a writable share (the regular-file check runs after the open, so it cannot prevent
   the block).
 - **Security headers at nginx.** Add what the app does not send: HSTS,
@@ -223,7 +233,7 @@ authentik should have no surprises; the expectations:
   top-level GETs); pure nuisance, no data exposure; a POST change would break the
   plain `<a href>` logout in the hybrid gate. No user identity in the session payload
   and no per-user revocation (the payload is `v1:<exp>`; back-channel logout is
-  documented as follow-up work in the ADR) — an audit trail is follow-up work for a
+  documented as follow-up work in the ADR), an audit trail is follow-up work for a
   future version.
 
 ## Docker
@@ -270,7 +280,7 @@ Published tags include the computed full version, release line, commit SHA tag, 
 - Issue templates: `.github/ISSUE_TEMPLATE/`
 - CI workflow: `.github/workflows/ci.yml`
 
-## Copilot Customization
+## Copilot customization
 
 Project-level AI guidance is defined in:
 
@@ -284,6 +294,8 @@ See `docs/ai/COPILOT_STACK.md` for rationale and usage guidance.
 ## License
 
 This project is licensed under the GNU Affero General Public License v3.0 only (AGPL-3.0-only).
+
+Copyright 2026 Adam H. Ogle and contributors.
 
 - Full license text: `LICENSE`
 - Source repository: https://github.com/adamhogle/yet-another-file-manager
