@@ -143,6 +143,7 @@ jobs:
           file: ./Dockerfile
           target: devcontainer
           push: false
+          load: true # export to the local daemon so the assertion step can docker run it
           tags: |
             yet-another-file-manager:devcontainer-ci
             yet-another-file-manager:devcontainer-${{ steps.version.outputs.image_version }}
