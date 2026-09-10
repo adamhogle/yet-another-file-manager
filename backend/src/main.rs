@@ -67,6 +67,10 @@ async fn run() -> Result<(), String> {
     // the oidc requirement entirely; the release image always enforces auth.
     // The check runs BEFORE initialize_auth so the flag is honored before the
     // oidc requirement is evaluated.
+    // YAFM_DISABLE_AUTH is release-ignored (cfg!(debug_assertions) is build-time):
+    // release builds always run initialize_auth(), which fails closed without
+    // an `oidc` block — pinned by `initialize_auth_requires_the_oidc_block` in
+    // src/auth.rs and verified manually against a --release binary.
     if cfg!(debug_assertions) && disable_auth_env.as_deref() == Some("1") {
         backend::auth::initialize_auth_disabled_for_tests();
     } else {

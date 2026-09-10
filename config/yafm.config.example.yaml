@@ -2,6 +2,7 @@
 # npm run dev resolves this as backend/../dev-data/share = dev-data/share.
 sharedRoot: ../dev-data/share
 showHidden: false
+# listing filter only — not an access control; hidden files are still downloadable by name
 listenAddress: 0.0.0.0
 listenPort: 8080
 
@@ -16,6 +17,7 @@ oidc:
   # Independent cookie-signing key. Optional: when omitted, a random key is
   # generated per process and every restart invalidates outstanding
   # sessions. Generate a stable key with: openssl rand -base64 32
+  # (a configured key shorter than 32 bytes is refused at startup).
   # sessionSigningKey: <base64 key>
   # Set false explicitly only with a loopback http redirectUri for local development.
   cookieSecure: true

@@ -39,7 +39,7 @@ const TEST_CLIENT_SECRET: &str = "gate-enumeration-client-secret";
 /// minted with the SAME signing key (the deterministic derivation is what
 /// makes the same-key mint valid — the real signature/expiry verification
 /// path is exercised).
-const TEST_SIGNING_KEY: &str = "auth-test-signing-key";
+const TEST_SIGNING_KEY: &str = "auth-test-signing-key-0123456789abcdef";
 
 /// The child-process mode of the fail-closed test: the auth state is a
 /// process-global OnceCell that cannot be reset, and tests run in parallel
@@ -137,6 +137,23 @@ async fn get(app: &Router, path: &str, cookie_header: Option<&str>) -> Response 
         .expect("response")
 }
 
+/// A method-parameterized request helper alongside `get`. The gate is
+/// method-agnostic (`gate_decision` never inspects the method — only state,
+/// path and Cookie), so non-GET requests on data routes must be gated exactly
+/// like GET: 401 for `/api/*`, 302 to the login endpoint for browser
+/// navigations. `get` stays the default for the existing tests; this helper
+/// is additive for pinning method-agnostic gating through the real router.
+async fn request(app: &Router, method: &str, path: &str, cookie_header: Option<&str>) -> Response {
+    let mut builder = Request::builder().method(method).uri(path);
+    if let Some(value) = cookie_header {
+        builder = builder.header("Cookie", value);
+    }
+    app.clone()
+        .oneshot(builder.body(Body::empty()).expect("build request"))
+        .await
+        .expect("response")
+}
+
 /// The 401 rejection's shape: the PublicErrorResponse JSON with a non-empty
 /// message and no host-path leak in the body.
 async fn assert_api_rejection(app: &Router, path: &str, cookie_header: Option<&str>) {
@@ -209,6 +226,68 @@ async fn unauthenticated_requests_to_every_endpoint_are_rejected() {
             assert_browser_rejection(&app, path, None).await;
         }
     }
+}
+
+/// The gate is method-agnostic: `gate_decision` (auth.rs) never inspects the
+/// request method — only state, path and Cookie — so OPTIONS/POST/HEAD on a
+/// data route must be gated identically to GET, before any method dispatch
+/// reaches a handler. The report probed these forms; this pins them through
+/// the real router. Do NOT expect a 405: the gate rejects before method
+/// handling, so `/api/*` is a 401 and `/` is a 302 to the login endpoint.
+#[tokio::test]
+async fn non_get_methods_are_gated_before_method_handling() {
+    let app = oidc_router().await;
+
+    for method in ["OPTIONS", "POST", "HEAD"] {
+        // /api/* → JSON 401.
+        let response = request(&app, method, "/api/v1/directory", None).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "{method} /api/v1/directory must be gated as a 401"
+        );
+
+        // browser navigation → 302.
+        let response = request(&app, method, "/", None).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::FOUND,
+            "{method} / must redirect to login"
+        );
+        let location = response
+            .headers()
+            .get("location")
+            .and_then(|value| value.to_str().ok())
+            .expect("the redirect carries a Location header");
+        assert!(
+            location.starts_with("/api/v1/auth/login"),
+            "{method} / must target the login endpoint, got {location}"
+        );
+    }
+}
+
+/// The report probed four public-path variants through the live binary and
+/// found them all gated: `/api/v1/auth/%6Cogin` → 401, `/api/v1/auth/login/`
+/// → 401, `/API/v1/auth/login` → 302, `//api/v1/auth/login` → 302. The gate
+/// exempts ONLY the exact-match public paths; `req.uri().path()` is NOT
+/// percent-decoded, so the `%6Cogin` form fails the exact-match exemption and
+/// falls into the `/api/` branch (401), the trailing-slash form likewise, and
+/// the case/double-slash forms are not `/api/` (case-sensitive prefix) so they
+/// fall into the browser-navigation branch (302 to the login endpoint). T1
+/// pinned these on the pure `is_public_path`/`gate_decision`; this proves the
+/// real router routes them the same way. Do NOT add these variants to
+/// `API_PATHS` (that const drives the whole-endpoint surface check) and do NOT
+/// percent-decode the path.
+#[tokio::test]
+async fn path_variant_public_paths_are_gated_through_the_router() {
+    let app = oidc_router().await;
+
+    // Percent-encoded and trailing-slash are gated as /api/* (401 JSON).
+    assert_api_rejection(&app, "/api/v1/auth/%6Cogin", None).await;
+    assert_api_rejection(&app, "/api/v1/auth/login/", None).await;
+    // Case and double-slash are NOT /api/ (case-sensitive) → 302 to login.
+    assert_browser_rejection(&app, "/API/v1/auth/login", None).await;
+    assert_browser_rejection(&app, "//api/v1/auth/login", None).await;
 }
 
 /// Forged and garbage session cookies must be rejected exactly like

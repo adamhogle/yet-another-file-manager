@@ -58,11 +58,18 @@ const TEST_CLIENT_SECRET: &str = "mock-idp-client-secret";
 /// The dedicated cookie-signing key the test config carries. The global jar
 /// is derived from it (the flow runs through the global jar), so the
 /// callback's minted session stays valid for the rest of the flow.
-const TEST_SIGNING_KEY: &str = "auth-test-signing-key";
+const TEST_SIGNING_KEY: &str = "auth-test-signing-key-0123456789abcdef";
 
 /// The `kid` the mock's JWK carries. The mock's JWKS holds one eligible key, so
 /// the backend's verifier picks it without ambiguity.
 const TEST_KEY_ID: &str = "test-key";
+
+/// The `kid` of the rotated key the mock switches to when the flow test
+/// exercises a signing-key rotation. The `kid` must change too: openidconnect's
+/// verifier looks up a key by the `kid` in the JWT header, so an ID token
+/// signed with a `kid` absent from the backend's cached JWKS is what triggers
+/// the `NoMatchingKey` refresh path Finding 1 adds.
+const TEST_KEY_ID_B: &str = "test-key-2";
 
 /// A pre-generated RSA 2048 test key (`openssl genrsa -traditional 2048`),
 /// thrown away: the private half signs the mock's ID tokens and the public half
@@ -97,6 +104,40 @@ sO+uxmCswOSi5urTJqLWnjeuZ4RsTa7LdmH1hJInrNUQEr/7vbPP/ps=
 -----END RSA PRIVATE KEY-----
 "#;
 
+/// A second pre-generated RSA 2048 test key (`openssl genrsa -traditional 2048`)
+/// the mock switches to for the signing-key-rotation step. It carries a
+/// distinct `kid` (`TEST_KEY_ID_B`), so an ID token signed with it fails the
+/// backend's cached-JWKS signature check with `NoMatchingKey` — exactly what
+/// triggers the one-time refresh.
+const TEST_KEY_PEM_B: &str = r#"-----BEGIN RSA PRIVATE KEY-----
+MIIEowIBAAKCAQEAuqTm+aotonFjRufTD+vzRyxP0mwRWYeljb+TJ5QqxKw9si3M
+zxSmaYrEmdTfS2i17BTbc9AkEEtxfspgGINkDEZy8O5HXcuOFiMnQmwW2Zz6gWfT
+V9SIuvMpsiIhipXC3GnYWtkccBeS2eQOb19N/fOnigH7ySXyiJS8InPedRhuDKrQ
+W9jYwwztSmGvGtHaqPHkXWpKcE7DgigoDIkpmfZTWMUhUbOvtVqi0+AIcg/g/Ynt
+0P0xUCQFmZbkCFXmxxv/9tismwWTLUH6OpGqzXOZ85Jeif31e9teBzXnEMGKUadQ
+1sm8n3zxz4P0LO1jIkL2zNHS46pv/7nVHLzxwwIDAQABAoIBABwSyKEd7T5FQtL7
+9J2s9ksqyZjTY2qtggPHoHkwCpzJcYA27lrpdrxiQH8I60s65T4sxvNtB7ehuWEC
+TKDzRl2oTQqbNIXRo74FrJaLjoZN28oSFVJdJ/HCuG9QPe5L52Li0sWbaXEcwpxe
+dqNe2OrNNtKFyNrxB8Fuabve5MOE1pxwwP/ukGiQYWpDoFG6aYq0KnKFeYma+nY9
+0/Wz9bxrwdVZh4poz18Gpx+EjQiIBRn7o1NNr+zRUd8HjqeYKqzzjtw8BaFlNO9t
+J4vjVnEt/rli8tAGQVUccw3AM5tDgIW5cdGjbb8ufTdbkRS4f7hNGPKjzy+L2auc
+SOiZZtkCgYEA8Lo5y+rfM8Hq/nfaX3pbyayF7D+DyWB2fymsLmUwvh4GKNJs56SD
+jQpxVpqsNayptnziUsZUfZr8j9U+4TjJ54iA63dDspPr9PfiP6AZWLgU6y+GvhcV
+UbDGYOXAe9liJbduz21EJX/HQ35OoHHWXW2ri1zWlqCrFvgzq8kbP4sCgYEAxnxI
+Y4NO8ojlhuzjGaA1Xi3WYK4xMUrwdNN4lLUL89soWIPXkojiwBOVRIgo8McCAk0B
+yqwaBDb44Lc0bVysQgKzIhyw4pDgIzyasdZffBOeVnvOH9vWzVX9FD0mLMJZQbFZ
+EiQpjiyfqTSBCAvrcjAIMDGK61sOy1nFv6hP3akCgYEA1Pc7iI7KViS5e9SWiZ9b
+MskBVec+9Nn1GzzHyefVvmwbcOPwWuItS4qwiDigH4AYSIylQSuateB2jdzPGzs9
+TCt0OlwxtPuuZPMj4rwFkHqSbxqFrwgG4VVtu22m4yqG7O0iCDoXbsFjjO9iKglr
+5w3OFKXWZj3P/qsoM1LgW08CgYB1uMTecMTkSJmJ2voe+sxsXVdm5Cm9CKtxPvOn
+j3HVYkidpyS2foWuUm8XxIIzvHTOlInZgRW1Jj2aWk64Bl0MkblZJBctaavmek1t
+6K2dU613sdphPuw5wSRnWpVHusVhlyQzBEu5TXIs0z0sXpV4llBk9R1l1g4CQe5t
+bBBicQKBgB+o6MZtMHAkXvC+HCquzHi0f5uBe2AWG4htdnNRbrBwQZIuiyk79gJS
+NsHhThT5FKsKqrpHnfWw6Eu9DOjn0bEtxK9vTzPf4NwOEV9dNoVWcis1omcZBVdY
+oTIhBRLSIHb0lfsHrZXT+EAq8OMmwfCu2N1HLfr3tvq+G4CmQ7kn
+-----END RSA PRIVATE KEY-----
+"#;
+
 /// The mock IdP, serving plain HTTP on an OS-assigned loopback port.
 struct MockIdp {
     /// The per-provider issuer the mock publishes in its discovery document
@@ -105,13 +146,41 @@ struct MockIdp {
     issuer: String,
     /// The mock's bound port, for the configured redirect URI.
     port: u16,
+    /// Shared state with the served router, kept so the test can rotate the
+    /// signing key between logins (a signing-key rotation is driven by the
+    /// provider, so the test needs a handle into it).
+    state: Arc<MockIdpState>,
+}
+
+impl MockIdp {
+    /// Rotates the mock's signing key to `TEST_KEY_PEM_B` (a new key with a
+    /// distinct `kid`). The mock is the only writer and the lock is held only
+    /// for the synchronous swap, so the in-flight token/JWKS handlers are not
+    /// blocked for long. Between the first and second login of the flow test
+    /// this reproduces an authentik signing-key rotation: the rotated ID token
+    /// carries a `kid` the backend's cached JWKS does not know.
+    fn rotate_signing_key(&self) {
+        let mut signing_key = self
+            .state
+            .signing_key
+            .lock()
+            .expect("lock the mock signing key");
+        *signing_key = CoreRsaPrivateSigningKey::from_pem(
+            TEST_KEY_PEM_B,
+            Some(JsonWebKeyId::new(TEST_KEY_ID_B.to_string())),
+        )
+        .expect("a valid rotated RSA private key");
+    }
 }
 
 /// The mock IdP's state: the RS256 signing key built once from the
 /// pre-generated PEM, and the authorization codes issued by the authorize stub
 /// with the challenge and nonce they were issued against.
 struct MockIdpState {
-    signing_key: CoreRsaPrivateSigningKey,
+    /// The RS256 signing key, behind a lock so the flow test can rotate it
+    /// between logins (an authentik signing-key rotation). The lock is held
+    /// only for the synchronous sign/JWKS build, never across an `.await`.
+    signing_key: Mutex<CoreRsaPrivateSigningKey>,
     issuer: String,
     codes: Mutex<MockIdpCodes>,
 }
@@ -144,22 +213,29 @@ fn start_mock_idp() -> MockIdp {
         .expect("set the mock IdP listener non-blocking");
     let issuer = format!("http://127.0.0.1:{port}/application/o/yafm/");
     let state = Arc::new(MockIdpState {
-        signing_key: CoreRsaPrivateSigningKey::from_pem(
-            TEST_KEY_PEM,
-            Some(JsonWebKeyId::new(TEST_KEY_ID.to_string())),
-        )
-        .expect("a valid RSA private key"),
+        signing_key: Mutex::new(
+            CoreRsaPrivateSigningKey::from_pem(
+                TEST_KEY_PEM,
+                Some(JsonWebKeyId::new(TEST_KEY_ID.to_string())),
+            )
+            .expect("a valid RSA private key"),
+        ),
         issuer: issuer.clone(),
         codes: Mutex::new(MockIdpCodes::default()),
     });
+    let state_for_router = state.clone();
     tokio::spawn(async move {
         let listener =
             tokio::net::TcpListener::from_std(listener).expect("convert the mock IdP listener");
-        axum::serve(listener, mock_idp_router(state))
+        axum::serve(listener, mock_idp_router(state_for_router))
             .await
             .expect("serve the mock IdP");
     });
-    MockIdp { issuer, port }
+    MockIdp {
+        issuer,
+        port,
+        state,
+    }
 }
 
 /// The mock IdP's routes, at the authentik per-provider paths. The discovery
@@ -317,14 +393,17 @@ async fn mock_token(
     // deliberately NOT set: the backend does not validate it (authentik
     // defaults it to false since 2025.10).
     let claims = claims.set_nonce(Some(Nonce::new(issued.nonce)));
-    let id_token = CoreIdToken::new(
-        claims,
-        &state.signing_key,
-        CoreJwsSigningAlgorithm::RsaSsaPkcs1V15Sha256,
-        None,
-        None,
-    )
-    .expect("the mock IdP signs the ID token");
+    let id_token = {
+        let signing_key = state.signing_key.lock().expect("lock the mock signing key");
+        CoreIdToken::new(
+            claims,
+            &*signing_key,
+            CoreJwsSigningAlgorithm::RsaSsaPkcs1V15Sha256,
+            None,
+            None,
+        )
+        .expect("the mock IdP signs the ID token")
+    };
     axum::Json(CoreTokenResponse::new(
         AccessToken::new("mock-access-token".to_string()),
         CoreTokenType::Bearer,
@@ -336,7 +415,8 @@ async fn mock_token(
 /// The mock's JWKS document: the public half of the pre-generated key, built
 /// through openidconnect's own serialization.
 async fn mock_jwks(State(state): State<Arc<MockIdpState>>) -> Response {
-    let jwks = CoreJsonWebKeySet::new(vec![state.signing_key.as_verification_key()]);
+    let signing_key = state.signing_key.lock().expect("lock the mock signing key");
+    let jwks = CoreJsonWebKeySet::new(vec![signing_key.as_verification_key()]);
     axum::Json(jwks).into_response()
 }
 
@@ -614,5 +694,68 @@ async fn the_full_oidc_flow_mints_a_session_and_closes_the_loop() {
     assert!(
         set_cookies.contains("yafm_session=") && set_cookies.contains("Max-Age=0"),
         "step 6: logout clears the session cookie: {set_cookies}"
+    );
+
+    // 7. Signing-key rotation (Finding 1): the mock swaps its signing key (and
+    //    `kid`) so a fresh login produces an ID token signed with a key the
+    //    backend's cached JWKS (fetched at the first discovery) does not know.
+    //    The callback detects the stale key (`NoMatchingKey`), clears the
+    //    cache, re-discovers the JWKS once and retries — proving the
+    //    refresh-on-rotation path. Without it, this second login would fail
+    //    with a 401.
+    mock.rotate_signing_key();
+
+    let response = get_backend(&app, backend::auth::LOGIN_PATH, None).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::FOUND,
+        "step 7: the login endpoint redirects to the (rotated) provider"
+    );
+    let authorize_location = location_header(response.headers());
+    assert!(
+        authorize_location.starts_with(&format!("{}authorize/", mock.issuer)),
+        "step 7: the login redirect targets the mock's authorization endpoint, got {authorize_location}"
+    );
+    let login_cookie = cookie_header_value(&response, backend::auth::LOGIN_COOKIE_NAME);
+    assert!(
+        !login_cookie.is_empty(),
+        "step 7: the login endpoint sets the login cookie"
+    );
+
+    let mock_response = mock_get(&authorize_location).await;
+    assert_eq!(
+        mock_response.status(),
+        StatusCode::FOUND,
+        "step 7: the mock accepts the authorization request and issues a code"
+    );
+    let callback_location = location_header(mock_response.headers());
+    let code = query_parameter(&callback_location, "code")
+        .expect("step 7: the mock's redirect carries the code");
+    let state = query_parameter(&authorize_location, "state")
+        .expect("step 7: the authorize URL carries the state");
+    assert_eq!(
+        query_parameter(&callback_location, "state"),
+        Some(state.clone()),
+        "step 7: the mock echoes the state back"
+    );
+
+    // The callback first fails the signature check against the cached JWKS,
+    // then refreshes the cache and retries once, so it still issues a session.
+    let callback_path = format!("/api/v1/auth/callback?code={code}&state={state}");
+    let response = get_backend(&app, &callback_path, Some(&login_cookie)).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::FOUND,
+        "step 7: the callback refreshes the JWKS on rotation and still issues a session"
+    );
+    assert_eq!(
+        location_header(response.headers()),
+        "/",
+        "step 7: the refreshed callback redirects to the validated returnTo"
+    );
+    let session_cookie = cookie_header_value(&response, backend::auth::SESSION_COOKIE_NAME);
+    assert!(
+        !session_cookie.is_empty(),
+        "step 7: the refreshed callback issues a session cookie"
     );
 }

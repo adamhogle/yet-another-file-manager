@@ -1,6 +1,7 @@
 //! Authentication state, session cookies and the auth gate middleware for the
 //! backend.
 
+use std::sync::RwLock;
 use std::time::{Duration as StdDuration, SystemTime, UNIX_EPOCH};
 
 use axum::Json;
@@ -13,13 +14,13 @@ use cookie::{Cookie, CookieJar, Key, SameSite};
 use once_cell::sync::OnceCell;
 use openidconnect::core::{CoreAuthenticationFlow, CoreClient};
 use openidconnect::{
-    AuthorizationCode, ClientId, ClientSecret, CsrfToken, EndSessionUrl, EndpointMaybeSet,
-    EndpointNotSet, EndpointSet, IssuerUrl, Nonce, PkceCodeChallenge, PkceCodeVerifier,
-    ProviderMetadataWithLogout, RedirectUrl, Scope, TokenResponse,
+    AuthorizationCode, ClaimsVerificationError, ClientId, ClientSecret, CsrfToken, EndSessionUrl,
+    EndpointMaybeSet, EndpointNotSet, EndpointSet, IssuerUrl, Nonce, PkceCodeChallenge,
+    PkceCodeVerifier, ProviderMetadataWithLogout, RedirectUrl, Scope, SignatureVerificationError,
+    TokenResponse,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use tokio::sync::OnceCell as AsyncOnceCell;
 use url::Url;
 
 use crate::PublicErrorResponse;
@@ -546,13 +547,21 @@ type DiscoveredClient = CoreClient<
     EndpointMaybeSet,
 >;
 
-/// What a successful discovery produces, cached for the process lifetime: the
-/// configured client (authorization + token endpoints, the discovered JWKS and
-/// the configured redirect URI) and the end-session endpoint when the provider
-/// publishes one. Discovery is lazy (first login/callback/logout use), so
-/// startup makes no network call and container ordering cannot break startup;
-/// a failed discovery leaves the cache empty so the next request retries (the
-/// first SUCCESSFUL call wins).
+/// What a successful discovery produces, cached (and refreshable) for the
+/// process lifetime: the configured client (authorization + token endpoints,
+/// the discovered JWKS and the configured redirect URI) and the end-session
+/// endpoint when the provider publishes one. Discovery is lazy (first
+/// login/callback/logout use), so startup makes no network call and container
+/// ordering cannot break startup; a failed discovery leaves the cache empty so
+/// the next request retries.
+///
+/// `Clone` is derived so the cache's `RwLock` can hand callers an owned copy
+/// without holding the guard: `reqwest::Client`, the openidconnect `CoreClient`
+/// and `EndSessionUrl` are all `Clone`, and every field is `Send + Sync`, so
+/// `std::sync::RwLock<Option<DiscoveredProvider>>` is sound. The clone cost
+/// (a handful of RSA public-key JWKS entries) is paid once per login/callback/
+/// logout, never in a request hot loop.
+#[derive(Clone)]
 struct DiscoveredProvider {
     client: DiscoveredClient,
     /// The HTTP client for the server-to-server token exchange, pooled across
@@ -561,22 +570,68 @@ struct DiscoveredProvider {
     end_session_url: Option<EndSessionUrl>,
 }
 
-static DISCOVERED_PROVIDER: AsyncOnceCell<DiscoveredProvider> = AsyncOnceCell::const_new();
+/// The refreshable discovery cache. Unlike the old process-lifetime
+/// `AsyncOnceCell`, this can be cleared on a stale signing key so the next
+/// request re-runs discovery (key rotation). `std::sync::RwLock` (not a tokio
+/// lock) is used because the guard is only ever held for the non-await field
+/// clone below — never across an `.await`, which would block the executor.
+static DISCOVERED_PROVIDER: RwLock<Option<DiscoveredProvider>> = RwLock::new(None);
 
 /// The process-global discovered provider, fetched lazily on the first
 /// login/callback/logout use. A failed discovery maps to the safe
 /// provider-unavailable error: the details go to the log for operators, the
-/// response never carries a raw upstream error.
-async fn discovered_provider(
-    config: &AuthOidcConfig,
-) -> Result<&'static DiscoveredProvider, AuthFlowError> {
-    DISCOVERED_PROVIDER
-        .get_or_try_init(|| async { discover_provider(config).await })
-        .await
-        .map_err(|error| {
-            tracing::warn!("OIDC provider discovery failed: {error}");
-            AuthFlowError::ProviderUnavailable
-        })
+/// response never carries a raw upstream error. A successful discovery is
+/// cached until `invalidate_provider_cache` clears it.
+///
+/// **How the lock avoids a deadlock.** The read guard is scoped to the
+/// non-await clone: it is dropped the moment we return a cached provider, and
+/// is released before the discovery `.await` on a cache miss. Holding a guard
+/// across an `.await` would block the async executor and risk deadlocking a
+/// concurrent login/callback/logout that needs the same provider.
+async fn discovered_provider(config: &AuthOidcConfig) -> Result<DiscoveredProvider, AuthFlowError> {
+    // Fast path: a cached provider. The `RwLock` read guard lives only for the
+    // clone (an Arc/Url copy) and is DROPPED before the first `.await` below.
+    {
+        let guard = DISCOVERED_PROVIDER
+            .read()
+            .expect("discovered provider lock");
+        if let Some(provider) = guard.as_ref() {
+            return Ok(provider.clone());
+        }
+    }
+
+    // Cache miss: discover WITHOUT holding the lock (the guard above is gone).
+    // Two concurrent first requests may each discover once; the last write wins
+    // and both providers are valid. The guarantee that matters — a failed
+    // discovery never caches a broken provider — holds, because the write below
+    // only runs on `Ok`.
+    let provider = discover_provider(config).await.map_err(|error| {
+        tracing::warn!("OIDC provider discovery failed: {error}");
+        AuthFlowError::ProviderUnavailable
+    })?;
+
+    *DISCOVERED_PROVIDER
+        .write()
+        .expect("discovered provider write lock") = Some(provider.clone());
+    Ok(provider)
+}
+
+/// Clears the cached provider so the next `discovered_provider()` call re-runs
+/// discovery. Called when a callback's ID-token signature verification fails
+/// with `SignatureVerificationError::NoMatchingKey`: the provider rotated its
+/// signing key, so the cached client (which fetched the JWKS once at discovery)
+/// can no longer validate new tokens. The refresh is one-time per callback; a
+/// failed re-discovery leaves the cache empty and the next request retries.
+///
+/// **Status correction over the 2026-09-07 report:** a stale signing key today
+/// surfaces as **401** (`AuthFlowError::Unauthorized`), not 503 provider
+/// unavailable — only discovery/token-exchange failures map to 503
+/// (`AuthFlowError::ProviderUnavailable`). The refresh preserves that 401 on a
+/// rejection that survives it.
+fn invalidate_provider_cache() {
+    *DISCOVERED_PROVIDER
+        .write()
+        .expect("discovered provider write lock") = None;
 }
 
 /// Fetches the provider metadata and JWKS from
@@ -771,7 +826,75 @@ async fn callback_response(
     if login.state != query.state.as_deref().unwrap_or_default() {
         return Err(AuthFlowError::Unauthorized);
     }
+    // The token exchange + ID-token validation is ONE callable step, so a
+    // stale-signing-key refresh can re-validate the already-exchanged ID token
+    // against a re-discovered JWKS without re-running the single-use code
+    // exchange.
     let provider = discovered_provider(config).await?;
+    exchange_code_and_validate_id_token(config, &provider, code, &login).await?;
+
+    // Single-use flow complete: mint the session, clear the login cookie and
+    // redirect to the return-to path (sanitized again — the cookie is signed,
+    // but the redirect target is still only trusted after the same-origin
+    // check).
+    let minted = jar.mint_session(SESSION_MAX_AGE_SECONDS);
+    let cleared = jar.clear_login();
+    Ok(redirect_with_cookies(
+        sanitize_return_to(Some(&login.return_to)).as_str(),
+        vec![minted, cleared],
+    ))
+}
+
+/// Whether an ID-token claims-verification failure is caused by a stale signing
+/// key and is therefore safe to retry once after a re-discovery. Only
+/// `SignatureVerificationError::NoMatchingKey` qualifies: the cached JWKS
+/// fetched during the last discovery no longer contains the `kid` the provider
+/// signed the token with, so refreshing the JWKS is openidconnect's documented
+/// remedy (the `NoMatchingKey` error is explicitly there to tell the client to
+/// refresh the JSON Web Key Set). A nonce/exp/aud/iss mismatch is a genuine
+/// reject (a replayed, tampered or expired token) and must NOT be retried — a
+/// retry would only mask the rejection.
+///
+/// Scope limitation: this only detects rotation that introduces a *new* `kid`
+/// (the provider signs the next ID token with a `kid` absent from the cached
+/// JWKS). An IdP that rotates its signing key but reuses the same `kid` fails
+/// signature verification with `SignatureVerificationError::CryptoError` (not
+/// `NoMatchingKey`), so it is not retried here and login stays broken until a
+/// restart. Documented so operators with such a provider are not surprised.
+fn claims_error_is_retryable(error: &ClaimsVerificationError) -> bool {
+    matches!(
+        error,
+        ClaimsVerificationError::SignatureVerification(SignatureVerificationError::NoMatchingKey)
+    )
+}
+
+/// Exchanges the authorization code at the token endpoint and validates the ID
+/// token (issuer, audience, expiration, nonce) — the self-contained step the
+/// callback runs once. On a stale-signing-key failure
+/// (`SignatureVerificationError::NoMatchingKey`) it clears the cached provider,
+/// re-runs discovery (which refetches the JWKS) and re-validates the SAME
+/// exchanged ID token once.
+///
+/// **Why the exchange is not re-run on retry.** An authorization code is
+/// single-use (RFC 6749): it was already consumed by the first token exchange,
+/// so a second exchange would fail at the provider. The ID token is already in
+/// hand, so the only thing a rotation changes is the set of signing keys the
+/// verifier trusts — refreshing the JWKS and re-validating the same ID token is
+/// openidconnect's documented remedy (`NoMatchingKey` tells the client to
+/// refresh the JSON Web Key Set). A token-exchange failure maps to
+/// provider-unavailable (503, not retried); a claim failure that survives the
+/// refresh maps to unauthorized (401).
+///
+/// **Status correction over the 2026-09-07 report:** a stale signing key
+/// surfaces as **401** (`AuthFlowError::Unauthorized`), not 503 provider
+/// unavailable — only discovery/token-exchange failures map to 503. The refresh
+/// preserves that 401 on a rejection that survives it.
+async fn exchange_code_and_validate_id_token(
+    config: &AuthOidcConfig,
+    provider: &DiscoveredProvider,
+    code: &str,
+    login: &LoginCookieData,
+) -> Result<(), AuthFlowError> {
     let token_response = provider
         .client
         .exchange_code(AuthorizationCode::new(code.to_string()))
@@ -788,19 +911,26 @@ async fn callback_response(
     // (replay protection). email_verified is deliberately NOT validated.
     let nonce = Nonce::new(login.nonce.clone());
     let verifier = provider.client.id_token_verifier();
-    id_token
-        .claims(&verifier, &nonce)
-        .map_err(|_| AuthFlowError::Unauthorized)?;
-    // Single-use flow complete: mint the session, clear the login cookie and
-    // redirect to the return-to path (sanitized again — the cookie is signed,
-    // but the redirect target is still only trusted after the same-origin
-    // check).
-    let minted = jar.mint_session(SESSION_MAX_AGE_SECONDS);
-    let cleared = jar.clear_login();
-    Ok(redirect_with_cookies(
-        sanitize_return_to(Some(&login.return_to)).as_str(),
-        vec![minted, cleared],
-    ))
+    match id_token.claims(&verifier, &nonce) {
+        Ok(_) => Ok(()),
+        Err(error) if claims_error_is_retryable(&error) => {
+            // The provider rotated its signing key: the cached JWKS (fetched
+            // once at discovery) no longer has the token's `kid`. Clear the
+            // cache, re-discover (refetches the JWKS) and re-validate the SAME
+            // ID token once. The authorization code is already consumed, so we
+            // must not re-run the exchange. A genuine claim rejection or a
+            // provider/exchange failure is NOT retried (see
+            // `claims_error_is_retryable`).
+            invalidate_provider_cache();
+            let provider = discovered_provider(config).await?;
+            let verifier = provider.client.id_token_verifier();
+            id_token
+                .claims(&verifier, &nonce)
+                .map(|_| ())
+                .map_err(|_| AuthFlowError::Unauthorized)
+        }
+        Err(_) => Err(AuthFlowError::Unauthorized),
+    }
 }
 
 /// The callback's query-parameter validation, as a pure function so the
@@ -915,11 +1045,11 @@ mod tests {
     /// material, so the same value mints and verifies.
     const TEST_SIGNING_KEY: &str = "auth-test-signing-key";
 
-    /// Every test that runs the gate's Oidc branch shares this config's
-    /// signing key: the process-global session-cookie jar is derived from the
-    /// first config it sees, so the Oidc-state tests must use the same
-    /// signing key for the jar to stay consistent regardless of test
-    /// ordering.
+    /// A non-blank OIDC client secret for the test configs and the
+    /// manually-constructed provider metadata (`ClientSecret::new`); it
+    /// satisfies the required `clientSecret` config field but is NOT the
+    /// session-cookie signing material — the jar derives from
+    /// TEST_SIGNING_KEY.
     const GATE_TEST_CLIENT_SECRET: &str = "gate-test-client-secret";
 
     /// The issuer and redirect URI of the test configs and the
@@ -996,8 +1126,11 @@ mod tests {
 
     /// initialize_auth errors on the missing `oidc` block before touching the
     /// auth state, so this assertion holds regardless of the Disabled-state
-    /// test above. It relies on the lib test binary's convention that no test
-    /// initializes the process-global CONFIG with an oidc block (OnceCells
+    /// test above. This also covers the release-build YAFM_DISABLE_AUTH path:
+    /// release ignores that env var (cfg!(debug_assertions) is build-time) and
+    /// always runs initialize_auth(), which fails closed here without an
+    /// `oidc` block. It relies on the lib test binary's convention that no
+    /// test initializes the process-global CONFIG with an oidc block (OnceCells
     /// cannot be reset, so such a test would break this one).
     #[test]
     fn initialize_auth_requires_the_oidc_block() {
@@ -1261,6 +1394,42 @@ mod tests {
         assert!(!is_public_path("/"));
     }
 
+    #[test]
+    fn public_path_variants_are_gated() {
+        // req.uri().path() is NOT percent-decoded; the public-path exemption is
+        // an exact string match on the raw path. The report probed these four
+        // variants and each must be gated (not treated as public).
+        assert!(!is_public_path("/api/v1/auth/%6Cogin"));
+        assert!(!is_public_path("/api/v1/auth/login/"));
+        assert!(!is_public_path("/API/v1/auth/login"));
+        assert!(!is_public_path("//api/v1/auth/login"));
+    }
+
+    #[test]
+    fn gate_decision_path_variants_match_the_probe_results() {
+        let config = gate_test_oidc_config();
+        let state = Some(&AuthState::Oidc(config.clone()));
+        // Percent-encoded and trailing-slash hit the /api/ branch → 401.
+        assert!(matches!(
+            gate_decision(state, "/api/v1/auth/%6Cogin", None),
+            GateDecision::Unauthorized
+        ));
+        assert!(matches!(
+            gate_decision(state, "/api/v1/auth/login/", None),
+            GateDecision::Unauthorized
+        ));
+        // Case and double-slash are NOT /api/ (case-sensitive) → browser
+        // redirect → 302.
+        assert!(matches!(
+            gate_decision(state, "/API/v1/auth/login", None),
+            GateDecision::RedirectToLogin
+        ));
+        assert!(matches!(
+            gate_decision(state, "//api/v1/auth/login", None),
+            GateDecision::RedirectToLogin
+        ));
+    }
+
     /// A minimal router for the gate's middleware-level behavior: the gate
     /// rejects before handlers run, so the handlers are trivial.
     fn gate_router() -> Router {
@@ -1407,6 +1576,20 @@ mod tests {
         assert_eq!(sanitize_return_to(Some("relative-path")), "/");
         // An empty value (a missing returnTo query param) falls back too.
         assert_eq!(sanitize_return_to(Some("")), "/");
+        // WHATWG dot-segment and percent-encoded-dot forms stay same-origin
+        // (relative to the origin): they must NOT be collapsed to a
+        // protocol-relative or absolute URL. They start with '/', contain no
+        // backslash, and do not start with "//", so they pass through as-is.
+        assert_eq!(
+            sanitize_return_to(Some("/%2e%2e/evil.example")),
+            "/%2e%2e/evil.example"
+        );
+        assert_eq!(sanitize_return_to(Some("/foo/../bar")), "/foo/../bar");
+        assert_eq!(
+            sanitize_return_to(Some("/foo/%2e%2e/bar")),
+            "/foo/%2e%2e/bar"
+        );
+        assert_eq!(sanitize_return_to(Some("/..%2f..%2fetc")), "/..%2f..%2fetc");
     }
 
     #[test]
@@ -1593,6 +1776,51 @@ mod tests {
             })
             .is_ok()
         );
+    }
+
+    /// The refresh-on-rotation decision: only a `NoMatchingKey` signature
+    /// failure indicates a stale JWKS (a provider signing-key rotation) and is
+    /// retryable. A genuine nonce/exp/aud/iss rejection — or a crypto error
+    /// from a tampered token — must NOT trigger a re-discovery, because the
+    /// cached key is fine and the rejection is the truth.
+    #[test]
+    fn claims_error_is_retryable_only_for_a_stale_signing_key() {
+        // The provider rotated its signing key: the token's `kid` is not in the
+        // cached JWKS. This is the one retryable failure.
+        assert!(claims_error_is_retryable(
+            &ClaimsVerificationError::SignatureVerification(
+                SignatureVerificationError::NoMatchingKey
+            )
+        ));
+
+        // Genuine claim rejections must NOT be retried.
+        assert!(!claims_error_is_retryable(
+            &ClaimsVerificationError::Expired("the token expired".to_string())
+        ));
+        assert!(!claims_error_is_retryable(
+            &ClaimsVerificationError::InvalidNonce("the nonce did not match".to_string())
+        ));
+        assert!(!claims_error_is_retryable(
+            &ClaimsVerificationError::InvalidAudience("the audience did not match".to_string())
+        ));
+        assert!(!claims_error_is_retryable(
+            &ClaimsVerificationError::InvalidIssuer("the issuer did not match".to_string())
+        ));
+
+        // A crypto error (a tampered signature, or a same-kid key of the wrong
+        // type) is NOT a rotation and must not trigger a re-discovery.
+        assert!(!claims_error_is_retryable(
+            &ClaimsVerificationError::SignatureVerification(
+                SignatureVerificationError::CryptoError("invalid signature".to_string())
+            )
+        ));
+        // An algorithm that is not allowed by the verifier is not a rotation
+        // either.
+        assert!(!claims_error_is_retryable(
+            &ClaimsVerificationError::SignatureVerification(
+                SignatureVerificationError::UnsupportedAlg("HS256".to_string())
+            )
+        ));
     }
 
     /// The login cookie is validated before any provider contact, so a

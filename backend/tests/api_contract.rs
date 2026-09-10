@@ -83,6 +83,22 @@ async fn directory_endpoint_matches_contract_shape_and_status_codes() {
 
     assert_eq!(invalid_response.status(), StatusCode::NOT_FOUND);
 
+    // Directory: double-encoded traversal (%252F is outer-decoded to %2F by the
+    // query extractor, then percent_decode_relative_path decodes it to a literal
+    // slash, yielding an absolute path that is rejected as 400).
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/directory?p=%252Fetc%252Fpasswd")
+                .method("GET")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("directory response");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
     // Download: valid file at root level
     let response = app
         .clone()
@@ -156,6 +172,21 @@ async fn directory_endpoint_matches_contract_shape_and_status_codes() {
         .expect("download response");
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    // Download: double-encoded traversal (%252F outer-decodes to %2F then to a
+    // literal slash; the resulting absolute path is rejected as 400).
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/download?p=%252Fetc%252Fpasswd")
+                .method("GET")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("download response");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
     // Download: absolute path returns 400
     let response = app

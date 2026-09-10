@@ -281,6 +281,13 @@ fn load_app_config(config_path: &Path) -> Result<AppConfig, String> {
 /// anywhere else would never receive the authorization code.
 const OIDC_CALLBACK_PATH: &str = "/api/v1/auth/callback";
 
+/// Full-sentence error for a `sessionSigningKey` that is present but shorter
+/// than the 32-byte floor. The session payload is fully predictable
+/// (`v1:<unix-exp>`), so one observed cookie is an offline verification
+/// oracle; an entropy-starved key makes that oracle cheap to brute force. The
+/// error names the floor and the fix.
+const OIDC_SESSION_KEY_TOO_SHORT_ERROR: &str = "Configuration oidc sessionSigningKey must be at least 32 bytes long; generate one with: openssl rand -base64 32";
+
 /// Validate the parsed `oidc` config block into the runtime shape. Only called
 /// when the block is present; the startup-abort decision for a missing block
 /// lives in the auth state initializer so test configs without the block can
@@ -320,6 +327,16 @@ fn validate_oidc_config(oidc: OidcConfigFile) -> Result<AuthOidcConfig, String> 
         .session_signing_key
         .map(|key| key.trim().to_string())
         .filter(|key| !key.is_empty());
+
+    // A present (non-blank) signing key must be at least 32 bytes. The floor is
+    // measured in bytes (`key.len()`); base64 keys are ASCII so it equals the
+    // char count. Blank stays absent (handled above), so the absent case falls
+    // through to the per-process random key.
+    if let Some(key) = &session_signing_key
+        && key.len() < 32
+    {
+        return Err(OIDC_SESSION_KEY_TOO_SHORT_ERROR.to_string());
+    }
 
     Ok(AuthOidcConfig {
         issuer: issuer.to_string(),
@@ -712,7 +729,11 @@ fn if_range_matches(
 /// whose (dev, ino) matches that identity: a path swapped between the stat and the
 /// open is rejected with 404 instead of served. The narrower canonicalize-to-stat
 /// window (a full fix would need openat2 with RESOLVE_IN_ROOT) is a known future
-/// refinement.
+/// refinement. Opening a named pipe (FIFO) planted in the share blocks a tokio
+/// blocking-pool thread until a writer appears — a request-per-thread DoS under a
+/// writable share. The regular-file check below runs AFTER the open, so it does not
+/// prevent the block. Mitigation: mount the shared root read-only (the documented
+/// deployment); openat2 with RESOLVE_IN_ROOT is the future full fix.
 async fn open_download_target(
     canonical_target: &Path,
 ) -> Result<(tokio::fs::File, fs::Metadata), ApiError> {
@@ -755,6 +776,10 @@ async fn open_download_target(
 /// attachment disposition, nosniff, range support advertisement and the weak ETag.
 fn content_response_headers(file_name: &str, etag: Option<&HeaderValue>) -> HeaderMap {
     let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("private"),
+    );
     headers.insert(
         header::CONTENT_TYPE,
         header::HeaderValue::from_static("application/octet-stream"),
@@ -837,7 +862,7 @@ async fn health() -> Json<HealthResponse> {
         (status = 503, description = "Storage unavailable", body = PublicErrorResponse)
     )
 )]
-async fn directory(Query(query): Query<PathQuery>) -> Result<Json<DirectoryListing>, ApiError> {
+async fn directory(Query(query): Query<PathQuery>) -> Result<Response, ApiError> {
     let config = get_app_config()?;
     let relative = validate_relative_path(&query.p)?;
 
@@ -904,11 +929,17 @@ async fn directory(Query(query): Query<PathQuery>) -> Result<Json<DirectoryListi
         _ => left.name.to_lowercase().cmp(&right.name.to_lowercase()),
     });
 
-    Ok(Json(DirectoryListing {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-store"),
+    );
+    let json = Json(DirectoryListing {
         current_path: relative.clone(),
         parent_path: parent_path(&relative),
         entries,
-    }))
+    });
+    Ok((StatusCode::OK, headers, json).into_response())
 }
 
 #[utoipa::path(
@@ -947,7 +978,15 @@ async fn download(
     // open_download_target verifies that the opened handle is a regular file whose
     // (dev, ino) matches the pre-open stat of the canonical target, blocking swaps
     // after the stat; the canonicalize-to-stat window remains (openat2 with
-    // RESOLVE_IN_ROOT is the future full fix).
+    // RESOLVE_IN_ROOT is the future full fix). Path-based checks cannot detect hard
+    // links — a hard link to an outside-root file planted in the shared root
+    // canonicalizes inside the root and passes every check — so the deployment
+    // mitigation is a read-only dedicated volume mount for the shared root (hard
+    // links cannot cross filesystems into it). The regular-file check runs AFTER the
+    // open, so a named pipe (FIFO) planted in the share blocks a tokio
+    // blocking-pool thread until a writer appears — a request-per-thread DoS under a
+    // writable share. The same read-only dedicated volume mount mitigates this: a
+    // FIFO cannot affect the service when the shared root is mounted read-only.
     let (mut file, meta) = open_download_target(&canonical).await?;
 
     let total = meta.len();
@@ -1052,6 +1091,10 @@ fn embedded_asset_response(path: &str) -> Option<Response> {
 
     let mut headers = HeaderMap::new();
     headers.insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-store"),
+    );
+    headers.insert(
         header::CONTENT_TYPE,
         header::HeaderValue::from_str(content_type.as_ref())
             .unwrap_or_else(|_| header::HeaderValue::from_static("application/octet-stream")),
@@ -1132,11 +1175,12 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        ByteRange, OidcConfigFile, RangeDecision, compute_weak_etag, content_disposition_value,
-        content_response_headers, ensure_within_root, etag_matches_weakly, if_none_match_matches,
-        load_app_config, modified_to_iso, open_download_target, parse_config_file,
-        parse_single_byte_range, percent_decode_relative_path, percent_encode_entry_name,
-        percent_encode_ext_value, validate_relative_path,
+        ByteRange, OIDC_SESSION_KEY_TOO_SHORT_ERROR, OidcConfigFile, RangeDecision,
+        compute_weak_etag, content_disposition_value, content_response_headers, ensure_within_root,
+        etag_matches_weakly, if_none_match_matches, load_app_config, modified_to_iso,
+        open_download_target, parse_config_file, parse_single_byte_range,
+        percent_decode_relative_path, percent_encode_entry_name, percent_encode_ext_value,
+        validate_relative_path,
     };
 
     #[test]
@@ -1254,7 +1298,7 @@ mod tests {
         let temp = TempDir::new().expect("temp dir");
         let config_path = write_oidc_config(
             &temp,
-            "oidc:\n  issuer: https://authentik.example.com/application/o/yafm/\n  clientId: yafm-spa\n  clientSecret: replace-me\n  sessionSigningKey: replace-signing-key\n  redirectUri: https://files.example.com/api/v1/auth/callback\n  cookieSecure: true\n",
+            "oidc:\n  issuer: https://authentik.example.com/application/o/yafm/\n  clientId: yafm-spa\n  clientSecret: replace-me\n  sessionSigningKey: replace-signing-key-0123456789abcdef\n  redirectUri: https://files.example.com/api/v1/auth/callback\n  cookieSecure: true\n",
         );
 
         let config = load_app_config(&config_path).expect("load config");
@@ -1268,13 +1312,29 @@ mod tests {
         assert_eq!(oidc.client_secret, "replace-me");
         assert_eq!(
             oidc.session_signing_key,
-            Some("replace-signing-key".to_string())
+            Some("replace-signing-key-0123456789abcdef".to_string())
         );
         assert_eq!(
             oidc.redirect_uri,
             "https://files.example.com/api/v1/auth/callback"
         );
         assert!(oidc.cookie_secure);
+    }
+
+    #[test]
+    fn oidc_session_signing_key_shorter_than_32_bytes_is_refused() {
+        // A present but under-32-byte key must abort config validation with the
+        // named full-sentence error. The session payload is predictable, so a
+        // short key leaves the per-cookie HMAC cheap to brute force offline.
+        let temp = TempDir::new().expect("temp dir");
+        let config_path = write_oidc_config(
+            &temp,
+            "oidc:\n  issuer: https://authentik.example.com/application/o/yafm/\n  clientId: yafm-spa\n  clientSecret: replace-me\n  sessionSigningKey: short-key\n  redirectUri: https://files.example.com/api/v1/auth/callback\n  cookieSecure: true\n",
+        );
+
+        let error = load_app_config(&config_path)
+            .expect_err("a signing key shorter than 32 bytes must be refused");
+        assert_eq!(error, OIDC_SESSION_KEY_TOO_SHORT_ERROR);
     }
 
     #[test]
@@ -1839,5 +1899,32 @@ mod tests {
             percent_decode_relative_path("x%2F..%2Fy").expect_err("traversal should be rejected");
 
         assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn percent_decode_relative_path_rejects_encoded_dot_and_double_encoded_slash() {
+        // A literal encoded-dot form decodes to ".." (a parent traversal) and must be
+        // rejected. On the wire a client sends "%2e%2e"; axum's Query decode turns it
+        // into ".." before validation, but this function must also refuse it directly.
+        assert!(
+            percent_decode_relative_path("%2e%2e").is_err(),
+            "literal %2e%2e must be rejected"
+        );
+
+        // A double-encoded slash ("%252F" on the wire) reaches this function as "%2F"
+        // after axum decodes the outer layer once. Decoding it back must not slip a "/"
+        // past the split-based validation: "%2Fetc%2Fpasswd" would otherwise become
+        // "/etc/passwd".
+        assert!(
+            percent_decode_relative_path("%2Fetc%2Fpasswd").is_err(),
+            "double-encoded / must be rejected"
+        );
+
+        // The same double-encoded slash in an otherwise-innocuous filename must also be
+        // rejected, not silently decoded into a nested path.
+        assert!(
+            percent_decode_relative_path("safe%2Fname.txt").is_err(),
+            "double-encoded slash in a name must be rejected"
+        );
     }
 }

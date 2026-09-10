@@ -160,3 +160,13 @@ Follow-up work:
   (`cfg!(debug_assertions)`); the release image builds `--release`, so production can
   never run open. Reverse-proxy deployments must permit server-to-server
   discovery/JWKS/token calls and must set `cookieSecure: true` behind HTTPS.
+- Logout CSRF is a documented residual risk: logout is a GET endpoint and
+  SameSite=Lax sends cookies on top-level GET navigations, so a cross-site top-level
+  navigation to `/api/v1/auth/logout` logs the victim out and ends their authentik
+  SSO session. Pure nuisance, no data exposure; a POST change would break the plain
+  `<a href>` logout in the hybrid gate (downloads are plain navigations), so the
+  residual is documented deliberately instead of closed.
+- No audit trail and no per-user revocation is a documented residual risk: the
+  session payload is `v1:<exp>` only — no user identity, no per-request logging, and
+  no way to invalidate one user's session. Embedding the ID token's subject in the
+  signed payload plus per-request logging is follow-up work.

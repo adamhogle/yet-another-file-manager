@@ -75,6 +75,11 @@ Follow-up work:
   handle against the pre-open stat, blocking swaps after the stat and direct symlink
   escapes; the narrower canonicalize-to-stat window remains (openat2 with
   RESOLVE_IN_ROOT is the future full fix).
+- Opening a named pipe (FIFO) planted in the share blocks a tokio blocking-pool thread
+  until a writer appears — a request-per-thread DoS under a writable share. The
+  regular-file check runs after the open, so it does not prevent the block. As with
+  the canonicalize-to-stat window, `openat2` with `RESOLVE_IN_ROOT` is the future full
+  fix and the documented read-only shared-root mount is the deployment mitigation.
 - ~~Add RFC 5987 `filename*` companions for non-ASCII download names.~~ Landed:
   non-ASCII names carry a `filename*=UTF-8''` companion per RFC 5987.
 

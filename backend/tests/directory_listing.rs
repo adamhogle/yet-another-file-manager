@@ -73,6 +73,15 @@ async fn hidden_entries_are_listed_when_show_hidden_is_true() {
         .await
         .expect("directory response");
     assert_eq!(response.status(), StatusCode::OK);
+    // The listing is authenticated content, so it must not be stored by any
+    // intermediary cache (no-store).
+    assert_eq!(
+        response
+            .headers()
+            .get("cache-control")
+            .and_then(|value| value.to_str().ok()),
+        Some("no-store")
+    );
 
     let bytes = response
         .into_body()

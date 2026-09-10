@@ -117,8 +117,10 @@ Failure modes:
   interactive challenges); JWTs are signed RS256 when the provider has a Signing Key
   selected and HS256-with-secret when none is configured; the client requests
   `[openid, profile, email]` explicitly (a no-scope request is treated as requesting
-  all configured scopes); `cookieSecure` defaults to false and must be true behind
-  HTTPS.
+  all configured scopes); `cookieSecure` defaults to false, must be true behind
+  HTTPS, and startup refuses an https redirectUri paired with
+  `cookieSecure: false` or omitted (set `false` explicitly only with a loopback
+  http redirectUri for local development).
 - Stateless signed session cookie via the `cookie` crate, HttpOnly, SameSite=Lax,
   Secure=configurable, 12h TTL; a short-lived signed login cookie (~10 min) carries
   state + nonce + PKCE verifier + `returnTo`. The signing key is independent of the
@@ -161,6 +163,13 @@ Failure modes:
 - No per-user permission logic anywhere — all-or-nothing only.
 - `returnTo` is validated as a same-origin relative path (starts with `/`, not `//`);
   anything else falls back to `/`, preventing open redirects.
+- Logout CSRF is a documented residual risk: the GET logout endpoint is reachable by
+  a cross-site top-level navigation (SameSite=Lax sends cookies on top-level GETs) —
+  pure nuisance, no data exposure; a POST change would break the plain `<a href>`
+  logout in the hybrid gate.
+- No audit trail and no per-user revocation: the session payload carries only a
+  version and an expiry (no user identity), so per-user identity and per-request
+  logging are follow-up work.
 
 ## Acceptance Criteria
 

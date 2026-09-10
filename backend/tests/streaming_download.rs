@@ -86,6 +86,16 @@ async fn download_serves_full_body_range_and_etag_semantics() {
             .and_then(|value| value.to_str().ok()),
         Some("bytes")
     );
+    // A 200 download is private: an authenticated user's file must not be cached
+    // by an intermediary (the ETag already enables revalidation, so without this
+    // heuristic caching is more likely).
+    assert_eq!(
+        response
+            .headers()
+            .get("cache-control")
+            .and_then(|value| value.to_str().ok()),
+        Some("private")
+    );
     let etag = response
         .headers()
         .get("etag")
