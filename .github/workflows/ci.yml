@@ -135,6 +135,11 @@ jobs:
           cache-from: type=gha,scope=devcontainer
           cache-to: type=gha,mode=max,scope=devcontainer
 
+      - name: Assert devcontainer toolchain matches rust-toolchain.toml
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          docker run --rm yet-another-file-manager:devcontainer-ci rustup toolchain list | grep -F "$(grep -oP 'channel = "\K[^"]+' backend/rust-toolchain.toml)"
+
       - name: Build runtime image
         if: github.event_name != 'push' || github.ref != 'refs/heads/main'
         uses: docker/build-push-action@v6

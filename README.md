@@ -28,7 +28,7 @@ before the first run:
 ```sh
 mkdir -p dev-data/share
 cp config/yafm.config.example.yaml config/yafm.config.yaml
-npm install
+npm ci
 npm run dev
 ```
 
@@ -52,9 +52,10 @@ Configuration fields:
 ```sh
 npm run dev               # Build frontend and run Rust backend
 npm run frontend:dev      # Run Vue dev server only
-npm run check             # Cargo check + frontend build
+npm run check             # Cargo check + frontend build + typecheck
+npm run typecheck         # vue-tsc typecheck over frontend/src and tests/
 npm run contract:check    # Regenerate OpenAPI/client and fail on drift
-npm run lint              # Prettier validation
+npm run lint              # Prettier + ESLint
 npm run test              # Cargo tests + integration tests
 npm run build             # Build release Rust binary with embedded frontend
 npm run version:print     # Resolve repo version from version.json + git height
@@ -67,6 +68,8 @@ The repository uses a single base version file at `version.json`.
 - `major` and `minor` are changed manually.
 - `patch` is derived from the git commit height since the last change to `version.json`.
 - `npm run version:print` shows the resolved build version for the current commit.
+- `node scripts/compute-version.mjs --plain` prints only the computed version, and `--release` prints the release-line version (`major.minor.0`).
+- The OpenAPI contract version in `api/openapi.yaml` is derived from `version.json`'s release line by the `openapi:generate` script.
 
 This version source is intended to drive future Docker image tags and release automation.
 

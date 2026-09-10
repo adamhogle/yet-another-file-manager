@@ -5,8 +5,30 @@ Thanks for contributing to Yet Another File Manager.
 ## Development Setup
 
 1. Use the dev container in `.devcontainer/devcontainer.json`.
-2. Install dependencies: `npm install`.
+2. Install dependencies: `npm ci`.
 3. Start the app: `npm run dev`.
+
+## 9p Checkouts
+
+Bind mounts served over 9p (Windows Docker Desktop and similar setups) reject
+operations native Linux filesystems allow: chmod fails with EPERM, and npm's
+bin-link step depends on it. On these checkouts run the commands in their
+verified forms:
+
+1. `npm ci --no-bin-links` and `npm ci --no-bin-links --prefix frontend`
+   instead of `npm ci` / `npm ci --prefix frontend`
+2. `cd frontend && node node_modules/vite/bin/vite.js build`
+   instead of `npm run frontend:build`
+3. `node node_modules/prettier/bin/prettier.cjs --check .` (or `--write .`)
+   instead of the prettier check in `npm run lint` / `npm run format`
+4. `node node_modules/vitest/vitest.mjs --config vitest.config.js --run`
+   instead of `npm run test:integration`
+5. `node node_modules/vue-tsc/bin/vue-tsc.js --noEmit` (instead of `npm run typecheck`)
+   and `node node_modules/eslint/bin/eslint.js "frontend/src/**/*.{ts,vue}" "tests/**/*.ts"`
+   for the eslint check in `npm run lint`
+
+Line endings need no extra setup: `.gitattributes` fixes them repo-wide for
+future clones.
 
 ## Supported Runtime
 

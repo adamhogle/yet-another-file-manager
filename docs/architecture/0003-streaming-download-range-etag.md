@@ -70,9 +70,13 @@ Trade-offs:
 
 Follow-up work:
 
-- Verify the opened handle after open (dev/ino + regular-file check) to close the
-  canonicalize→read window.
-- Add RFC 5987 `filename*` companions for non-ASCII download names.
+- ~~Verify the opened handle after open (dev/ino + regular-file check) to close the
+  canonicalize→read window.~~ Landed: the download open step now verifies the opened
+  handle against the pre-open stat, blocking swaps after the stat and direct symlink
+  escapes; the narrower canonicalize-to-stat window remains (openat2 with
+  RESOLVE_IN_ROOT is the future full fix).
+- ~~Add RFC 5987 `filename*` companions for non-ASCII download names.~~ Landed:
+  non-ASCII names carry a `filename*=UTF-8''` companion per RFC 5987.
 
 ## Security / Operations Impact
 

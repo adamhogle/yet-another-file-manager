@@ -7,10 +7,11 @@
   "scripts": {
     "dev": "npm run backend:dev",
     "build": "npm run backend:build",
-    "check": "npm run frontend:build && npm run backend:check",
+    "check": "npm run frontend:build && npm run typecheck && npm run backend:check",
+    "typecheck": "vue-tsc --noEmit",
     "version:print": "node scripts/compute-version.mjs",
     "version:github-output": "node scripts/compute-version.mjs --github-output",
-    "lint": "prettier --check .",
+    "lint": "prettier --check . && eslint --no-error-on-unmatched-pattern \"frontend/src/**/*.{ts,vue}\" \"tests/**/*.ts\"",
     "format": "prettier --write .",
     "test": "npm run frontend:build && npm run backend:test && npm run test:integration",
     "frontend:build": "cd frontend && npm run build",
@@ -19,15 +20,22 @@
     "backend:dev": "npm run frontend:build && cd backend && cargo run --bin backend -- ../config/yafm.config.yaml",
     "backend:build": "npm run frontend:build && cd backend && cargo build --release --bin backend",
     "frontend:dev": "cd frontend && npm run dev",
-    "openapi:generate": "cd backend && cargo run --bin openapi -- ../api/openapi.yaml && npx prettier --write ../api/openapi.yaml",
-    "client:generate": "node scripts/generate-openapi-client.mjs && npx prettier --write frontend/src/lib/api/generated/client.js",
+    "openapi:generate": "cargo run --manifest-path backend/Cargo.toml --bin openapi -- api/openapi.yaml \"$(node scripts/compute-version.mjs --release)\" && npx prettier --write api/openapi.yaml",
+    "client:generate": "node scripts/generate-openapi-client.mjs && npx prettier --write frontend/src/lib/api/generated/client.ts",
     "contract:generate": "npm run openapi:generate && npm run client:generate",
-    "contract:check": "npm run contract:generate && git diff --exit-code -- api/openapi.yaml frontend/src/lib/api/generated/client.js",
+    "contract:check": "npm run contract:generate && git diff --exit-code -- api/openapi.yaml frontend/src/lib/api/generated/client.ts",
     "test:integration": "vitest --config vitest.config.js --run"
   },
   "devDependencies": {
+    "@vue/eslint-config-typescript": "^14.9.0",
+    "eslint": "^10.10.0",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-vue": "^10.10.0",
     "prettier": "^3.8.1",
-    "vitest": "^4.1.3"
+    "typescript": "~5.9.3",
+    "vitest": "^4.1.3",
+    "vue-eslint-parser": "^10.4.1",
+    "vue-tsc": "^3.3.11"
   },
   "dependencies": {
     "yaml": "^2.9.0"

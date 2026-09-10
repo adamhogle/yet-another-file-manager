@@ -1,5 +1,5 @@
 ---
-applyTo: 'src/**/*.server.ts,src/lib/server/**/*.ts'
+applyTo: 'backend/src/**/*.rs'
 ---
 
 When changing file-system logic, enforce these controls:

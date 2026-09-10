@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { formatModified, formatSize } from '../frontend/src/lib/format.js';
+import { formatModified, formatSize } from '../frontend/src/lib/format';
 
 const referenceFormatter = new Intl.DateTimeFormat(undefined, {
   year: 'numeric',

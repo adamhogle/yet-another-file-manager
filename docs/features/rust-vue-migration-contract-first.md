@@ -70,10 +70,10 @@ As a self-hosted file manager operator and contributor, I want the backend in Ru
 
 ## Test Plan
 
-- Unit: Rust path normalization, traversal blocking, and symlink boundary checks.
+- Unit: Rust path normalization, traversal blocking, and symlink boundary checks (`backend/src/lib.rs` unit tests plus the `backend/tests/symlink_escape.rs` regression test).
 - Integration: backend endpoint contract tests against OpenAPI-described structures.
 - End-to-end/manual: Vue flow invoking generated client against running backend.
-- CI quality gates: contract generation check, frontend typecheck, tests.
+- CI quality gates: contract generation check, lint, frontend build, frontend typecheck (vue-tsc --noEmit over frontend/src and tests/), backend and integration tests — the frontend is TypeScript.
 
 ## Open Questions
 

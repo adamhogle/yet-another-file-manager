@@ -69,8 +69,8 @@ As a person browsing shared files, I want to click a download control next to a 
 
 ## Test Plan
 
-- Unit: file download path resolution for valid files, invalid paths, missing files, directories, symlink escape attempts
-- Integration: download route response headers and error mapping
+- Unit: file download path resolution for valid files, invalid paths, missing files, and directories (`backend/src/lib.rs` unit tests); symlink escape attempts are covered by the `backend/tests/symlink_escape.rs` regression test
+- Integration: download route response headers and error mapping (`backend/tests/streaming_download.rs`, `backend/tests/api_contract.rs`)
 - End-to-end/manual: clicking download icon from listing starts attachment download
 
 ## Open Questions

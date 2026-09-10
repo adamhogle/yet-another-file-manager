@@ -18,6 +18,11 @@ use rust_embed::Embed;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
+
+// The filesystem layer relies on std::os::unix APIs (dev/ino identity checks and
+// raw-byte path handling) and targets Linux, where the runtime image and CI run.
+#[cfg(not(unix))]
+compile_error!("yet-another-file-manager targets unix (Linux); non-unix builds are not supported.");
 use tower_http::trace::TraceLayer;
 use utoipa::{OpenApi, ToSchema};
 
@@ -553,8 +558,10 @@ fn if_range_matches(
 /// Opens the download target and returns the file handle together with the handle's
 /// own metadata, the fstat of what will actually be served. The canonical target's
 /// identity is captured before the open, and the opened handle must be a regular file
-/// whose (dev, ino) matches that identity: a path swapped between validation and open
-/// is rejected with 404 instead of served.
+/// whose (dev, ino) matches that identity: a path swapped between the stat and the
+/// open is rejected with 404 instead of served. The narrower canonicalize-to-stat
+/// window (a full fix would need openat2 with RESOLVE_IN_ROOT) is a known future
+/// refinement.
 async fn open_download_target(
     canonical_target: &Path,
 ) -> Result<(tokio::fs::File, fs::Metadata), ApiError> {
@@ -787,7 +794,9 @@ async fn download(
     ensure_within_root(&config.shared_root, &canonical)?;
 
     // open_download_target verifies that the opened handle is a regular file whose
-    // (dev, ino) matches the canonical target, closing the canonicalize-to-read gap.
+    // (dev, ino) matches the pre-open stat of the canonical target, blocking swaps
+    // after the stat; the canonicalize-to-stat window remains (openat2 with
+    // RESOLVE_IN_ROOT is the future full fix).
     let (mut file, meta) = open_download_target(&canonical).await?;
 
     let total = meta.len();

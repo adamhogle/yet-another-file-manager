@@ -48,7 +48,7 @@ As a self-hosting administrator using the file manager, I want to browse the con
 - Initialize and validate runtime configuration at server startup, then reuse the initialized config during request handling.
 - During startup, resolve configured `sharedRoot` to its canonical realpath and persist that value in memory for request handlers.
 - Fail startup when `sharedRoot` does not exist as a directory.
-- When configuration is invalid, collect and log all validation issues through the server logger at startup, then abort startup with a generic `Configuration errors exist` failure.
+- When configuration is invalid, startup validation fails on the first error it hits and aborts startup with that specific message (for example `Configuration sharedRoot "..." does not exist; create it or fix the config file`); no server logger collects all issues before failing (`load_app_config` in `backend/src/lib.rs`).
 - Resolve incoming relative paths against a configured root directory.
 - Reject absolute paths, traversal attempts, and symlink escapes.
 - Return a typed response model containing the current relative path and a list of entries.
@@ -90,7 +90,7 @@ As a self-hosting administrator using the file manager, I want to browse the con
 - Runtime configuration is loaded from JSON/YAML via server-side configuration loader only.
 - Runtime configuration is now validated during server startup instead of during endpoint execution.
 - Configured shared roots are canonicalized to realpaths during startup and reused from in-memory config.
-- Startup validation now logs all discovered config issues before failing fast with a generic startup exception.
+- Startup validation fails fast on the first config error with an error naming the problem; there is no collector that logs all issues before aborting.
 - Directory browsing uses server-rendered navigation with query parameter `p`.
 - Directory listing now returns Name, Size, and Modified metadata for compact details-style display.
 - Directory path display now uses clickable breadcrumbs (`root / foo / bar`) in the client and no longer uses a separate "Up" button.

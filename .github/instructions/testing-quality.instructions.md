@@ -1,5 +1,5 @@
 ---
-applyTo: 'backend/**/*.rs,frontend/src/**/*.{js,vue},tests/**/*.{test,spec}.{js,ts},backend/tests/**/*.rs'
+applyTo: 'backend/**/*.rs,frontend/src/**/*.{js,ts,vue},tests/**/*.{test,spec}.{js,ts},backend/tests/**/*.rs'
 ---
 
 For changes with behavior impact:

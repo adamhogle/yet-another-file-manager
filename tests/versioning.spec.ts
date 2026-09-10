@@ -16,8 +16,8 @@ function createFakeGit({
   lastVersionCommit = LAST_VERSION_COMMIT,
   height = '7',
   branch = 'main'
-} = {}) {
-  return vi.fn(async (args) => {
+}: { lastVersionCommit?: string; height?: string; branch?: string } = {}) {
+  return vi.fn(async (args: string[]) => {
     if (args[0] === 'log') return lastVersionCommit;
     if (args[0] === 'rev-list') return height;
     if (args[0] === 'rev-parse') {
@@ -74,7 +74,7 @@ describe('git-height versioning', () => {
 });
 
 describe('resolveVersionInfo', () => {
-  let tempRoot;
+  let tempRoot: string;
 
   beforeEach(async () => {
     tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'yafm-version-'));

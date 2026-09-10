@@ -1,29 +1,34 @@
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess, type ChildProcessByStdio } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import type { Readable } from 'node:stream';
 import { setTimeout as delay } from 'node:timers/promises';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { getApiV1Directory, getApiV1Health } from '../frontend/src/lib/api/generated/client.js';
+import { getApiV1Directory, getApiV1Health } from '../frontend/src/lib/api/generated/client';
 
 const repoRoot = process.cwd();
 const READINESS_BUDGET_MS = 150_000;
 const LISTEN_LINE_PATTERN = /backend listening on http:\/\/\S+:(\d+)/;
 const ANSI_PATTERN = /\u001B\[[0-9;]*m/g;
 
-let backendProcess;
-let backendStdout;
-let tempDirectory;
-let baseUrl;
+// `stdio: ['ignore', 'pipe', 'pipe']` ignores stdin and pipes stdout/stderr, so the
+// spawned handle is a ChildProcessByStdio with non-null streams.
+type BackendProcess = ChildProcessByStdio<null, Readable, Readable>;
 
-function stripAnsiEscapes(text) {
+let backendProcess: BackendProcess | undefined;
+let backendStdout: string;
+let tempDirectory: string;
+let baseUrl: string;
+
+function stripAnsiEscapes(text: string): string {
   return text.replace(ANSI_PATTERN, '');
 }
 
-async function waitForListenPort(startedAt) {
+async function waitForListenPort(startedAt: number): Promise<number> {
   const deadline = startedAt + READINESS_BUDGET_MS;
 
   while (Date.now() < deadline) {
@@ -40,7 +45,7 @@ async function waitForListenPort(startedAt) {
   );
 }
 
-async function waitForBackendReady(url, startedAt) {
+async function waitForBackendReady(url: string, startedAt: number): Promise<void> {
   const deadline = startedAt + READINESS_BUDGET_MS;
 
   while (Date.now() < deadline) {
@@ -59,7 +64,7 @@ async function waitForBackendReady(url, startedAt) {
   throw new Error(`Backend did not become ready at ${url} within ${READINESS_BUDGET_MS}ms`);
 }
 
-function waitForExit(child, timeoutMs) {
+function waitForExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
   return new Promise((resolve) => {
     if (child.exitCode !== null || child.signalCode !== null) {
       resolve(true);
@@ -74,12 +79,14 @@ function waitForExit(child, timeoutMs) {
   });
 }
 
-function signalBackendGroup(signal) {
+function signalBackendGroup(signal: NodeJS.Signals): void {
   // The backend spawns detached as a process-group leader because `cargo run`
   // wraps the actual binary and killing only the wrapper would orphan it. A
   // negative pid signals the whole group so no cargo/rustc child survives.
   try {
-    process.kill(-backendProcess.pid, signal);
+    if (backendProcess?.pid) {
+      process.kill(-backendProcess.pid, signal);
+    }
   } catch {
     // The process group is already gone.
   }

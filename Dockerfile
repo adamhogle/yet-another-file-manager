@@ -18,6 +18,16 @@ ENV RUSTUP_HOME=/usr/local/rustup \
     PATH="/usr/local/cargo/bin:${PATH}"
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path
 
+# Bake the toolchain pinned in backend/rust-toolchain.toml (the single source of
+# truth) so the devcontainer user never has to download a toolchain into the
+# root-owned RUSTUP_HOME. Parsing the pin at build time keeps CI images and
+# local devcontainer rebuilds in sync; the docker-image CI job additionally
+# asserts the match (drift guard).
+COPY backend/rust-toolchain.toml /tmp/rust-toolchain.toml
+RUN TOOLCHAIN_CHANNEL="$(grep -oP 'channel = "\K[^"]+' /tmp/rust-toolchain.toml)" \
+    && rustup toolchain install "$TOOLCHAIN_CHANNEL" \
+    && rustup default "$TOOLCHAIN_CHANNEL"
+
 # Stage 2: Build frontend assets and compile Rust backend
 FROM base AS build
 
@@ -54,3 +64,9 @@ CMD ["./backend"]
 FROM base AS devcontainer
 
 WORKDIR /workspace
+
+# Belt-and-braces: keep the toolchain dirs writable by the devcontainer user
+# (remoteUser: node) so an in-place rustup toolchain install or update works
+# even if the baked pin ever drifts. The runtime stage is built from
+# debian:bookworm-slim and never sees these directories.
+RUN chmod -R a+rwX /usr/local/rustup /usr/local/cargo

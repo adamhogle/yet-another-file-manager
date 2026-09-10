@@ -107,6 +107,11 @@ async function main() {
     return;
   }
 
+  if (process.argv.includes('--release')) {
+    console.log(versionInfo.releaseVersion);
+    return;
+  }
+
   console.log(JSON.stringify(versionInfo, null, 2));
 }
 

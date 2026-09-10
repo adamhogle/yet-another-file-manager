@@ -1,13 +1,14 @@
-<script setup>
+<script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
 import { buildDownloadHref, fetchDirectory, toChildPath } from './lib/api/client';
-import { formatSize, formatModified } from './lib/format.js';
+import type { DirectoryEntry } from './lib/api/client';
+import { formatSize, formatModified } from './lib/format';
 
 const title = 'Yet Another File Manager';
 const repositoryUrl = 'https://github.com/adamhogle/yet-another-file-manager';
 const currentYear = new Date().getFullYear();
 const currentPath = ref('');
-const entries = ref([]);
+const entries = ref<DirectoryEntry[]>([]);
 const errorMessage = ref('');
 const isLoading = ref(true);
 
@@ -25,11 +26,11 @@ const breadcrumbs = computed(() => {
   return items;
 });
 
-function readPathFromUrl() {
+function readPathFromUrl(): string {
   return new URLSearchParams(window.location.search).get('p') ?? '';
 }
 
-function updateUrl(path) {
+function updateUrl(path: string): void {
   const url = new URL(window.location.href);
   if (path) {
     url.searchParams.set('p', path);
@@ -39,7 +40,7 @@ function updateUrl(path) {
   window.history.pushState({}, '', url);
 }
 
-async function loadDirectory(path, updateHistory = true) {
+async function loadDirectory(path: string, updateHistory = true): Promise<void> {
   isLoading.value = true;
   errorMessage.value = '';
 
@@ -60,7 +61,7 @@ async function loadDirectory(path, updateHistory = true) {
   }
 }
 
-function openDirectory(path) {
+function openDirectory(path: string): void {
   loadDirectory(path, true);
 }
 

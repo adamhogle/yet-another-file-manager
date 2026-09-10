@@ -1,5 +1,5 @@
 ---
-applyTo: 'backend/src/**/*.rs,frontend/src/**/*.{js,vue},frontend/vite.config.js,package.json'
+applyTo: 'backend/src/**/*.rs,frontend/src/**/*.{js,ts,vue},frontend/vite.config.js,package.json'
 ---
 
 Prefer the Rust backend + Vue frontend split over framework-specific shortcuts.

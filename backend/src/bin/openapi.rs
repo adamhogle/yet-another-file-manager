@@ -10,9 +10,19 @@ fn main() {
     let output_path = env::args()
         .nth(1)
         .unwrap_or_else(|| "../api/openapi.yaml".to_string());
+    let version = match env::args().nth(2) {
+        Some(version) => version,
+        None => {
+            eprintln!(
+                "OpenAPI version argument is required; pass the release version derived from version.json"
+            );
+            std::process::exit(1);
+        }
+    };
 
     let mut openapi = ApiDoc::openapi();
     openapi.info.title = "Yet Another File Manager".to_string();
+    openapi.info.version = version;
     openapi.info.description =
         Some("A web-based file manager for self-hosted local file sharing.".to_string());
     let mut license = License::new("AGPL-3.0-only");

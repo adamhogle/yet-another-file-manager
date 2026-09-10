@@ -6,17 +6,21 @@ const dateFormatter = new Intl.DateTimeFormat(undefined, {
   minute: '2-digit'
 });
 
-export function formatSize(sizeBytes) {
+export function formatSize(sizeBytes: number | null | undefined): string {
   if (sizeBytes === null) {
     return '';
   }
 
-  if (sizeBytes < 1024) {
-    return `${sizeBytes} B`;
+  // Undefined input deliberately reaches the NaN path below (asserted in tests):
+  // coalescing it to NaN keeps that behavior while making the arithmetic type-safe.
+  const bytes = sizeBytes ?? NaN;
+
+  if (bytes < 1024) {
+    return `${bytes} B`;
   }
 
   const units = ['KB', 'MB', 'GB', 'TB'];
-  let value = sizeBytes / 1024;
+  let value = bytes / 1024;
   let unitIndex = 0;
 
   while (value >= 1024 && unitIndex < units.length - 1) {
@@ -31,7 +35,7 @@ export function formatSize(sizeBytes) {
 // Malformed or absent input renders as empty rather than a fabricated timestamp:
 // entries carry modifiedAt: null when the backend cannot stat the file, and
 // new Date(null) would otherwise silently format as the epoch.
-export function formatModified(isoString) {
+export function formatModified(isoString: string | null | undefined): string {
   if (isoString === null || isoString === undefined) {
     return '';
   }
