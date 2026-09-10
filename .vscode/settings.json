@@ -1,0 +1,15 @@
+{
+  "chat.tools.terminal.autoApprove": {
+    "npx prettier": true,
+    "/^cd /workspaces/yet-another-file-manager/backend && \\. \"\\$HOME/\\.cargo/env\" && cargo/": {
+      "approve": true,
+      "matchCommandLine": true
+    },
+    "/^npm --prefix /workspaces/yet-another-file-manager run/": {
+      "approve": true,
+      "matchCommandLine": true
+    }
+  },
+  "editor.insertSpaces": true,
+  "editor.tabSize": 2
+}

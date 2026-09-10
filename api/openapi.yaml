@@ -1,0 +1,146 @@
+components:
+  schemas:
+    DirectoryEntry:
+      properties:
+        kind:
+          $ref: '#/components/schemas/EntryKind'
+        modifiedAt:
+          type: string
+        name:
+          type: string
+        sizeBytes:
+          format: int64
+          minimum: 0
+          type:
+            - integer
+            - 'null'
+      required:
+        - name
+        - kind
+        - modifiedAt
+      type: object
+    DirectoryListing:
+      properties:
+        currentPath:
+          type: string
+        entries:
+          items:
+            $ref: '#/components/schemas/DirectoryEntry'
+          type: array
+        parentPath:
+          type:
+            - string
+            - 'null'
+      required:
+        - currentPath
+        - entries
+      type: object
+    EntryKind:
+      enum:
+        - directory
+        - file
+      type: string
+    HealthResponse:
+      properties:
+        service:
+          type: string
+        status:
+          type: string
+      required:
+        - status
+        - service
+      type: object
+    PublicErrorResponse:
+      properties:
+        message:
+          type: string
+      required:
+        - message
+      type: object
+info:
+  description: ''
+  license:
+    name: ''
+  title: backend
+  version: 0.1.0
+openapi: 3.1.0
+paths:
+  /api/v1/directory:
+    get:
+      operationId: getApiV1Directory
+      parameters:
+        - description: Relative path under shared root
+          in: query
+          name: p
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DirectoryListing'
+          description: Directory listing
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublicErrorResponse'
+          description: Invalid request
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublicErrorResponse'
+          description: Directory not found
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublicErrorResponse'
+          description: Storage unavailable
+      tags: []
+  /api/v1/download:
+    get:
+      operationId: getApiV1Download
+      parameters:
+        - description: Relative file path under shared root
+          in: query
+          name: p
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: File download stream
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublicErrorResponse'
+          description: Invalid request
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublicErrorResponse'
+          description: File not found
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublicErrorResponse'
+          description: Storage unavailable
+      tags: []
+  /api/v1/health:
+    get:
+      operationId: getApiV1Health
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+          description: API health status
+      tags: []

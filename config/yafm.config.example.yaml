@@ -1,0 +1,4 @@
+sharedRoot: /data/share
+showHidden: false
+listenAddress: 0.0.0.0
+listenPort: 8080

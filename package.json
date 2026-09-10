@@ -1,0 +1,33 @@
+{
+  "name": "yet-another-file-manager",
+  "private": true,
+  "version": "0.0.1",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "scripts": {
+    "dev": "npm run backend:dev",
+    "build": "npm run backend:build",
+    "check": "npm run backend:check && npm run frontend:build",
+    "lint": "prettier --check .",
+    "format": "prettier --write .",
+    "test": "npm run backend:test && npm run test:integration",
+    "frontend:build": "cd frontend && npm run build",
+    "backend:check": "cd backend && cargo check",
+    "backend:test": "cd backend && cargo test",
+    "backend:dev": "npm run frontend:build && cd backend && cargo run --bin backend -- ../config/yafm.config.yaml",
+    "backend:build": "npm run frontend:build && cd backend && cargo build --release --bin backend",
+    "frontend:dev": "cd frontend && npm run dev",
+    "openapi:generate": "cd backend && cargo run --bin openapi -- ../api/openapi.yaml && npx prettier --write ../api/openapi.yaml",
+    "client:generate": "node scripts/generate-openapi-client.mjs",
+    "contract:generate": "npm run openapi:generate && npm run client:generate",
+    "contract:check": "npm run contract:generate && git diff --exit-code -- api/openapi.yaml frontend/src/lib/api/generated/client.js",
+    "test:integration": "vitest --config vitest.config.js --run"
+  },
+  "devDependencies": {
+    "prettier": "^3.8.1",
+    "vitest": "^4.1.3"
+  },
+  "dependencies": {
+    "yaml": "^2.9.0"
+  }
+}

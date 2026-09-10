@@ -1,0 +1,30 @@
+node_modules
+
+# Output
+.output
+.vercel
+.netlify
+.wrangler
+/build
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+.env.*
+!.env.example
+!.env.test
+
+# Local runtime config and sample data
+config/yafm.config.yaml
+dev-data/
+
+# Vite
+vite.config.js.timestamp-*
+vite.config.ts.timestamp-*
+frontend/dist/
+
+# Rust
+backend/target/

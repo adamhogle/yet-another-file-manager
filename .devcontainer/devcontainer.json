@@ -1,0 +1,25 @@
+{
+  "name": "yet-another-file-manager-dev",
+  "image": "mcr.microsoft.com/devcontainers/javascript-node:22-bookworm",
+  "forwardPorts": [8080, 5173],
+  "portsAttributes": {
+    "8080": {
+      "label": "Rust Backend",
+      "onAutoForward": "notify"
+    },
+    "5173": {
+      "label": "Vue Dev Server",
+      "onAutoForward": "notify"
+    }
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": ["rust-lang.rust-analyzer", "Vue.volar", "esbenp.prettier-vscode"],
+      "settings": {
+        "editor.formatOnSave": true,
+        "files.eol": "\n"
+      }
+    }
+  },
+  "remoteUser": "node"
+}
