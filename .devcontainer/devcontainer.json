@@ -1,6 +1,17 @@
 {
   "name": "yet-another-file-manager-dev",
-  "image": "mcr.microsoft.com/devcontainers/javascript-node:22-bookworm",
+  "build": {
+    "dockerfile": "../Dockerfile",
+    "context": "..",
+    "target": "devcontainer"
+  },
+  "initializeCommand": "bash -lc 'systemctl --user start podman.socket'",
+  "mounts": [
+    "type=bind,source=${localEnv:XDG_RUNTIME_DIR}/podman/podman.sock,target=/var/run/docker.sock"
+  ],
+  "containerEnv": {
+    "DOCKER_HOST": "unix:///var/run/docker.sock"
+  },
   "forwardPorts": [8080, 5173],
   "portsAttributes": {
     "8080": {
@@ -21,5 +32,6 @@
       }
     }
   },
+  "overrideCommand": true,
   "remoteUser": "node"
 }

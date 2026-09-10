@@ -1,13 +1,15 @@
 {
   "name": "yet-another-file-manager",
   "private": true,
-  "version": "0.0.1",
+  "version": "0.1.0",
   "license": "AGPL-3.0-only",
   "type": "module",
   "scripts": {
     "dev": "npm run backend:dev",
     "build": "npm run backend:build",
     "check": "npm run backend:check && npm run frontend:build",
+    "version:print": "node scripts/compute-version.mjs",
+    "version:github-output": "node scripts/compute-version.mjs --github-output",
     "lint": "prettier --check .",
     "format": "prettier --write .",
     "test": "npm run backend:test && npm run test:integration",
@@ -18,7 +20,7 @@
     "backend:build": "npm run frontend:build && cd backend && cargo build --release --bin backend",
     "frontend:dev": "cd frontend && npm run dev",
     "openapi:generate": "cd backend && cargo run --bin openapi -- ../api/openapi.yaml && npx prettier --write ../api/openapi.yaml",
-    "client:generate": "node scripts/generate-openapi-client.mjs",
+    "client:generate": "node scripts/generate-openapi-client.mjs && npx prettier --write frontend/src/lib/api/generated/client.js",
     "contract:generate": "npm run openapi:generate && npm run client:generate",
     "contract:check": "npm run contract:generate && git diff --exit-code -- api/openapi.yaml frontend/src/lib/api/generated/client.js",
     "test:integration": "vitest --config vitest.config.js --run"

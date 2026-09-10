@@ -51,7 +51,45 @@ npm run contract:check    # Regenerate OpenAPI/client and fail on drift
 npm run lint              # Prettier validation
 npm run test              # Cargo tests + integration tests
 npm run build             # Build release Rust binary with embedded frontend
+npm run version:print     # Resolve repo version from version.json + git height
 ```
+
+## Versioning
+
+The repository uses a single base version file at `version.json`.
+
+- `major` and `minor` are changed manually.
+- `patch` is derived from the git commit height since the last change to `version.json`.
+- `npm run version:print` shows the resolved build version for the current commit.
+
+This version source is intended to drive future Docker image tags and release automation.
+
+## Docker
+
+Build the production container image:
+
+```sh
+docker build -t yet-another-file-manager:local .
+```
+
+Run the container with a mounted config and shared directory:
+
+```sh
+docker run --rm -p 8080:8080 \
+	-v "$(pwd)/config/yafm.config.example.yaml:/app/config/config.yaml:ro" \
+	-v "$(pwd)/dev-data/share:/data/share:ro" \
+	yet-another-file-manager:local
+```
+
+The CI workflow also builds this image on every push and pull request to `main`.
+
+Pushes to `main` also publish the runtime image to GitHub Container Registry:
+
+```sh
+docker pull ghcr.io/adamhogle/yet-another-file-manager:latest
+```
+
+Published tags include the computed full version, release line, commit SHA tag, and `latest`.
 
 ## Governance
 
