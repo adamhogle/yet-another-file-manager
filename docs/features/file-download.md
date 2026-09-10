@@ -41,8 +41,8 @@ As a person browsing shared files, I want to click a download control next to a 
 
 ## Technical Notes
 
-- Add a server route at `src/routes/download/+server.ts`.
-- Keep privileged path resolution in `src/lib/server/file-service.ts`.
+- Add a server route at `/api/v1/download` in `backend/src/lib.rs`.
+- Keep privileged path resolution in `backend/src/lib.rs` with `validate_relative_path` and `ensure_within_root`.
 - Reuse path normalization and root-boundary protections.
 - Ensure resolved targets are files (not directories).
 - Set `Content-Disposition: attachment` and `Content-Type: application/octet-stream`.

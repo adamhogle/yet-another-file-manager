@@ -1,0 +1,4 @@
+# Pinned so the devcontainer image and CI both resolve the same compiler;
+# rustup reads this file automatically, no extra wiring needed.
+[toolchain]
+channel = "1.98.1"

@@ -60,6 +60,7 @@ async fn directory_endpoint_matches_contract_shape_and_status_codes() {
     assert!(first_entry.get("modifiedAt").is_some());
 
     let invalid_response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .uri("/api/v1/directory?p=../secret")
@@ -71,6 +72,125 @@ async fn directory_endpoint_matches_contract_shape_and_status_codes() {
         .expect("invalid response");
 
     assert_eq!(invalid_response.status(), StatusCode::NOT_FOUND);
+
+    // Download: valid file at root level
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/download?p=docs/demo.txt")
+                .method("GET")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("download response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok()),
+        Some("application/octet-stream")
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("content-disposition")
+            .and_then(|v| v.to_str().ok()),
+        Some("attachment; filename=\"demo.txt\"")
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("x-content-type-options")
+            .and_then(|v| v.to_str().ok()),
+        Some("nosniff")
+    );
+
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect body")
+        .to_bytes();
+    assert_eq!(&bytes[..], b"hello");
+
+    // Download: empty path returns 400
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/download")
+                .method("GET")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("download response");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    // Download: path traversal returns 404
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/download?p=../secret")
+                .method("GET")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("download response");
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    // Download: absolute path returns 400
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/download?p=/etc/passwd")
+                .method("GET")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("download response");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    // Download: non-existent file returns 404
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/download?p=missing.txt")
+                .method("GET")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("download response");
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    // Download: directory target returns 404
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/download?p=docs")
+                .method("GET")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("download response");
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -120,3 +240,5 @@ async fn embedded_frontend_serves_index_and_preserves_unknown_api_404() {
 
     assert_eq!(unknown_api_response.status(), StatusCode::NOT_FOUND);
 }
+
+

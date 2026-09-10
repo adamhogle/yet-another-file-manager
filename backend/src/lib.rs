@@ -16,6 +16,7 @@ use utoipa::{OpenApi, ToSchema};
 
 #[derive(Embed)]
 #[folder = "../frontend/dist/"]
+#[allow_missing = true]
 struct FrontendAssets;
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -171,10 +172,21 @@ fn load_app_config(config_path: &Path) -> Result<AppConfig, String> {
         return Err("Configuration sharedRoot is required".to_string());
     }
 
-    let canonical_root = fs::canonicalize(&parsed.shared_root)
-        .map_err(|_| "Configuration sharedRoot is invalid".to_string())?;
+    let shared_root = PathBuf::from(parsed.shared_root.trim());
+    let shared_root_display = shared_root.display().to_string();
+
+    if !shared_root.exists() {
+        return Err(format!(
+            "Configuration sharedRoot \"{shared_root_display}\" does not exist; create it or fix the config file"
+        ));
+    }
+
+    let canonical_root = fs::canonicalize(&shared_root)
+        .map_err(|_| format!("Configuration sharedRoot \"{shared_root_display}\" is invalid"))?;
     if !canonical_root.is_dir() {
-        return Err("Configuration sharedRoot must be a directory".to_string());
+        return Err(format!(
+            "Configuration sharedRoot \"{shared_root_display}\" must be a directory"
+        ));
     }
 
     let listen_address = parsed
@@ -505,3 +517,48 @@ pub fn app_router() -> Router {
     ))
 )]
 pub struct ApiDoc;
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use tempfile::TempDir;
+
+    use super::load_app_config;
+
+    #[test]
+    fn missing_shared_root_names_the_directory_and_the_fix() {
+        let temp = TempDir::new().expect("temp dir");
+        let missing_root = temp.path().join("missing-share");
+        let config_path = temp.path().join("config.yaml");
+        fs::write(
+            &config_path,
+            format!("sharedRoot: {}\n", missing_root.display()),
+        )
+        .expect("write config");
+
+        let error = load_app_config(&config_path).expect_err("missing sharedRoot should fail");
+
+        assert!(error.contains("does not exist"));
+        assert!(error.contains(missing_root.display().to_string().as_str()));
+    }
+
+    #[test]
+    fn existing_shared_root_loads_with_defaults() {
+        let temp = TempDir::new().expect("temp dir");
+        let root = temp.path().join("share");
+        fs::create_dir_all(&root).expect("create root");
+        let config_path = temp.path().join("config.yaml");
+        fs::write(&config_path, format!("sharedRoot: {}\n", root.display())).expect("write config");
+
+        let config = load_app_config(&config_path).expect("load config");
+
+        assert_eq!(config.listen_address, "0.0.0.0");
+        assert_eq!(config.listen_port, 8080);
+        assert!(!config.show_hidden);
+        assert_eq!(
+            config.shared_root,
+            root.canonicalize().expect("canonical root")
+        );
+    }
+}

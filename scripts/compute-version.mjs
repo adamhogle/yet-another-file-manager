@@ -1,6 +1,7 @@
 import { execFile as execFileCallback } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 const execFile = promisify(execFileCallback);
@@ -110,7 +111,7 @@ async function main() {
 }
 
 const directRunPath = process.argv[1] ? path.resolve(process.argv[1]) : null;
-const modulePath = new URL(import.meta.url).pathname;
+const modulePath = fileURLToPath(import.meta.url);
 
 if (directRunPath === modulePath) {
   main().catch((error) => {

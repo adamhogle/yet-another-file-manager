@@ -1,53 +1,56 @@
-#syntax=docker/dockerfile:1.7
+# Stage 1: Shared toolchain (Node + Rust)
+FROM node:22.23.2-bookworm-slim AS base
 
-FROM mcr.microsoft.com/devcontainers/javascript-node:22-bookworm AS toolchain
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    ca-certificates \
+    git \
+    openssh-client \
+    build-essential \
+    pkg-config \
+    libssl-dev \
+    tar \
+    && rm -rf /var/lib/apt/lists/*
 
-ENV CARGO_HOME=/usr/local/cargo
-ENV RUSTUP_HOME=/usr/local/rustup
-ENV PATH=/usr/local/cargo/bin:${PATH}
+# Install rustup under /usr/local so the non-root devcontainer user can run cargo
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH="/usr/local/cargo/bin:${PATH}"
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path
 
-RUN apt-get update \
-	&& apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev ca-certificates curl \
-	&& rm -rf /var/lib/apt/lists/* \
-	&& curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain stable
+# Stage 2: Build frontend assets and compile Rust backend
+FROM base AS build
 
-FROM toolchain AS frontend-builder
-WORKDIR /workspace/frontend
+WORKDIR /build
 
-COPY frontend/package*.json ./
-RUN npm ci
+COPY . .
 
-COPY frontend/ ./
-RUN npm run build
+RUN npm ci && cd frontend && npm ci
 
-FROM toolchain AS backend-builder
-WORKDIR /workspace
-
-COPY backend/Cargo.toml backend/Cargo.lock ./backend/
-COPY backend/src ./backend/src
-COPY backend/tests ./backend/tests
-COPY --from=frontend-builder /workspace/frontend/dist ./frontend/dist
+RUN npm run frontend:build
 
 RUN cd backend && cargo build --release --bin backend
 
-FROM toolchain AS devcontainer
-RUN apt-get update \
-	&& apt-get install -y --no-install-recommends docker.io gh \
-	&& rm -rf /var/lib/apt/lists/* \
-	&& mkdir -p /etc/docker \
-	&& printf '{"iptables": false}\n' > /etc/docker/daemon.json
-USER node
-
+# Stage 3: Minimal runtime image with non-root user
 FROM debian:bookworm-slim AS runtime
-RUN useradd --system --uid 10001 --create-home --home-dir /app appuser
 
-WORKDIR /app
-COPY --from=backend-builder /workspace/backend/target/release/backend ./backend
-COPY config/yafm.config.example.yaml ./config/config.yaml
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
-RUN chown -R appuser:appuser /app
-USER appuser
+RUN groupadd -r yafm && useradd -r -g yafm yafm
+
+COPY --from=build /build/backend/target/release/backend /app/backend
 
 EXPOSE 8080
-ENTRYPOINT ["/app/backend"]
-CMD ["/app/config/config.yaml"]
+
+USER yafm
+
+WORKDIR /app
+
+CMD ["./backend"]
+
+# Stage 4: Devcontainer for local development
+FROM base AS devcontainer
+
+WORKDIR /workspace

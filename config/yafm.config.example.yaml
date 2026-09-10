@@ -1,4 +1,6 @@
-sharedRoot: /data/share
+# Absolute path, or relative to the backend binary's working directory.
+# npm run dev resolves this as backend/../dev-data/share = dev-data/share.
+sharedRoot: ../dev-data/share
 showHidden: false
 listenAddress: 0.0.0.0
 listenPort: 8080

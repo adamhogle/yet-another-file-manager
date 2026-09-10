@@ -3,6 +3,7 @@ use std::fs;
 use std::path::Path;
 
 use backend::ApiDoc;
+use utoipa::openapi::info::License;
 use utoipa::OpenApi;
 
 fn main() {
@@ -10,9 +11,16 @@ fn main() {
         .nth(1)
         .unwrap_or_else(|| "../api/openapi.yaml".to_string());
 
-    let openapi = ApiDoc::openapi();
-    let json_value = serde_json::to_value(&openapi).expect("failed to serialize OpenAPI");
-    let yaml = serde_yaml::to_string(&json_value).expect("failed to render OpenAPI yaml");
+    let mut openapi = ApiDoc::openapi();
+    openapi.info.title = "Yet Another File Manager".to_string();
+    openapi.info.description = Some(
+        "A web-based file manager for self-hosted local file sharing.".to_string(),
+    );
+    let mut license = License::new("AGPL-3.0-only");
+    license.url = Some("https://www.gnu.org/licenses/agpl-3.0.txt".to_string());
+    openapi.info.license = Some(license);
+
+    let yaml = serde_yaml::to_string(&openapi).expect("failed to serialize OpenAPI to YAML");
 
     if let Some(parent) = Path::new(&output_path).parent() {
         fs::create_dir_all(parent).expect("failed to create OpenAPI output directory");

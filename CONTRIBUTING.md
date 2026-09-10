@@ -6,7 +6,7 @@ Thanks for contributing to Yet Another File Manager.
 
 1. Use the dev container in `.devcontainer/devcontainer.json`.
 2. Install dependencies: `npm install`.
-3. Start the app: `npm run dev -- --open`.
+3. Start the app: `npm run dev`.
 
 ## Supported Runtime
 

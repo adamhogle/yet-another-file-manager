@@ -21,7 +21,13 @@ Current baseline includes:
 
 ## Quickstart
 
+The example config points `sharedRoot` at `../dev-data/share`, which the backend resolves relative to
+its working directory (`backend/` when run through `npm run dev`), so create the shared directory
+before the first run:
+
 ```sh
+mkdir -p dev-data/share
+cp config/yafm.config.example.yaml config/yafm.config.yaml
 npm install
 npm run dev
 ```
@@ -66,19 +72,28 @@ This version source is intended to drive future Docker image tags and release au
 
 ## Docker
 
-Build the production container image:
+Build the production runtime image:
 
 ```sh
-docker build -t yet-another-file-manager:local .
+docker build --target runtime -t yet-another-file-manager:local .
 ```
 
-Run the container with a mounted config and shared directory:
+Run the container with a mounted config and shared directory. With no config argument, the
+backend falls back to `config.yaml` in its working directory (`/app` in the container), so the
+config mounts at `/app/config.yaml`. The example config's `sharedRoot: ../dev-data/share`
+resolves to `/dev-data/share`, matching the second mount:
 
 ```sh
 docker run --rm -p 8080:8080 \
-	-v "$(pwd)/config/yafm.config.example.yaml:/app/config/config.yaml:ro" \
-	-v "$(pwd)/dev-data/share:/data/share:ro" \
+	-v "$(pwd)/config/yafm.config.example.yaml:/app/config.yaml:ro" \
+	-v "$(pwd)/dev-data/share:/dev-data/share:ro" \
 	yet-another-file-manager:local
+```
+
+Build the devcontainer image (used by `.devcontainer/devcontainer.json`):
+
+```sh
+docker build -t yet-another-file-manager:devcontainer .
 ```
 
 The CI workflow also builds this image on every push and pull request to `main`.

@@ -47,11 +47,11 @@ As a maintainer, I want one manually managed base version with automatically der
 
 ## Acceptance Criteria
 
-- [ ] A single repo-level base version file exists and is documented.
-- [ ] A script can output the computed semver version and Docker-safe tags for the current commit.
-- [ ] CI uses the version script so future publish steps can consume consistent outputs.
-- [ ] Existing package manifests no longer disagree on the project release line.
-- [ ] Focused automated tests cover the version calculation logic.
+- [x] A single repo-level base version file exists and is documented.
+- [x] A script can output the computed semver version and Docker-safe tags for the current commit.
+- [x] CI uses the version script so future publish steps can consume consistent outputs.
+- [x] Existing package manifests no longer disagree on the project release line.
+- [x] Focused automated tests cover the version calculation logic.
 
 ## Test Plan
 

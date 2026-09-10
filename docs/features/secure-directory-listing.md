@@ -43,7 +43,7 @@ As a self-hosting administrator using the file manager, I want to browse the con
 
 ## Technical Notes
 
-- Use a server-only file service in `src/lib/server/` for directory reads.
+- Use server-only path validation and directory reads in `backend/src/lib.rs`.
 - Load runtime configuration from a JSON or YAML file, with a Docker-friendly default path and optional explicit path override.
 - Initialize and validate runtime configuration at server startup, then reuse the initialized config during request handling.
 - During startup, resolve configured `sharedRoot` to its canonical realpath and persist that value in memory for request handlers.

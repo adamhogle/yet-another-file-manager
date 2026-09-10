@@ -46,10 +46,10 @@ As a maintainer, I want successful `main` builds to publish a versioned runtime 
 
 ## Acceptance Criteria
 
-- [ ] CI publishes the runtime image on `main` push.
-- [ ] Published tags include semver, release line, SHA, and `latest`.
-- [ ] Pull request runs do not push images.
-- [ ] Documentation names the GHCR image location.
+- [x] CI publishes the runtime image on `main` push.
+- [x] Published tags include semver, release line, SHA, and `latest`.
+- [x] Pull request runs do not push images.
+- [x] Documentation names the GHCR image location.
 
 ## Test Plan
 

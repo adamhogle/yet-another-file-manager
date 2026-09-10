@@ -6,7 +6,7 @@ This repository installs a stricter Copilot customization stack aligned to secur
 
 1. Repository baseline instructions: `.github/copilot-instructions.md`
 2. Targeted instructions:
-   - `.github/instructions/sveltekit-architecture.instructions.md`
+   - `.github/instructions/backend-frontend-architecture.instructions.md`
    - `.github/instructions/file-security.instructions.md`
    - `.github/instructions/testing-quality.instructions.md`
 3. Specialized agents:

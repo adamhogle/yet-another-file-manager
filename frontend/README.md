@@ -1,5 +1,7 @@
-# Vue 3 + Vite
+# Frontend
 
-This template should help get you started developing with Vue 3 in Vite. The template uses Vue 3 `<script setup>` SFCs, check out the [script setup docs](https://v3.vuejs.org/api/sfc-script-setup.html#sfc-script-setup) to learn more.
+Vue 3 SPA for Yet Another File Manager, built with Vite.
 
-Learn more about IDE Support for Vue in the [Vue Docs Scaling up Guide](https://vuejs.org/guide/scaling-up/tooling.html#ide-support).
+Consumes the Rust backend API via an auto-generated OpenAPI client at `src/lib/api/generated/client.js`. The client is regenerated from `api/openapi.yaml` — see `scripts/generate-openapi-client.mjs` and the `contract:generate` npm script at the repo root.
+
+Built frontend assets are embedded into the Rust binary at compile time via `rust-embed`.

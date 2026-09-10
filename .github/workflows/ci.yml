@@ -17,6 +17,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history for git-height versioning (compute-version.mjs)
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -27,8 +29,15 @@ jobs:
       - name: Resolve build version
         run: node scripts/compute-version.mjs
 
+      - name: Read pinned toolchain
+        id: rust-pin
+        run: echo "channel=$(grep -oP 'channel = "\K[^"]+' backend/rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust-pin.outputs.channel }}
+          components: clippy, rustfmt
 
       - name: Install dependencies
         run: npm ci
@@ -64,6 +73,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history for git-height versioning (compute-version.mjs)
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -106,6 +117,7 @@ jobs:
         with:
           context: .
           file: ./Dockerfile
+          target: runtime
           push: false
           tags: |
             yet-another-file-manager:runtime-ci
@@ -120,6 +132,7 @@ jobs:
         with:
           context: .
           file: ./Dockerfile
+          target: runtime
           push: true
           tags: |
             ghcr.io/adamhogle/yet-another-file-manager:${{ steps.version.outputs.image_version }}
