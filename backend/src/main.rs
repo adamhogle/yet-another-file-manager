@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process;
 
 use tokio::net::TcpListener;
+use tracing_subscriber::EnvFilter;
 
 fn resolve_config_path(args: impl Iterator<Item = String>, cwd: &Path) -> Result<PathBuf, String> {
     let values: Vec<String> = args.collect();
@@ -35,8 +36,22 @@ async fn main() {
     }
 }
 
+fn init_tracing() {
+    // Defaults to info-level app logs with tower-http's own request logging visible;
+    // RUST_LOG replaces the whole directive set when set.
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,tower_http=debug"));
+    tracing_subscriber::fmt()
+        .compact()
+        .with_env_filter(env_filter)
+        .init();
+}
+
 async fn run() -> Result<(), String> {
-    let cwd = env::current_dir().map_err(|_| "Could not determine current directory".to_string())?;
+    init_tracing();
+
+    let cwd =
+        env::current_dir().map_err(|_| "Could not determine current directory".to_string())?;
     let config_path = resolve_config_path(env::args().skip(1), &cwd)?;
     backend::initialize_app_config(&config_path)?;
     let binding = backend::get_server_binding()?;
@@ -46,7 +61,12 @@ async fn run() -> Result<(), String> {
         .await
         .map_err(|_| format!("failed to bind backend listener on {listen_address}"))?;
 
-    println!("backend listening on http://{listen_address}");
+    // Report the actual bound address so listenPort: 0 resolves to the assigned port.
+    let bound_address = listener
+        .local_addr()
+        .map_err(|_| "could not determine the bound address of the backend listener".to_string())?;
+
+    tracing::info!("backend listening on http://{bound_address}");
 
     axum::serve(listener, backend::app_router())
         .await
@@ -67,8 +87,11 @@ mod tests {
     #[test]
     fn resolves_explicit_config_path_from_cli_argument() {
         let cwd = TempDir::new().expect("temp dir");
-        let resolved = resolve_config_path(["../config/yafm.config.yaml".to_string()].into_iter(), cwd.path())
-            .expect("resolve explicit path");
+        let resolved = resolve_config_path(
+            ["../config/yafm.config.yaml".to_string()].into_iter(),
+            cwd.path(),
+        )
+        .expect("resolve explicit path");
 
         assert_eq!(resolved, PathBuf::from("../config/yafm.config.yaml"));
     }
@@ -79,7 +102,8 @@ mod tests {
         let config_path = cwd.path().join("config.yaml");
         fs::write(&config_path, "sharedRoot: /tmp\n").expect("write config");
 
-        let resolved = resolve_config_path(std::iter::empty(), cwd.path()).expect("resolve default config");
+        let resolved =
+            resolve_config_path(std::iter::empty(), cwd.path()).expect("resolve default config");
 
         assert_eq!(resolved, config_path);
     }
@@ -87,7 +111,8 @@ mod tests {
     #[test]
     fn requires_config_argument_when_no_cwd_defaults_exist() {
         let cwd = TempDir::new().expect("temp dir");
-        let error = resolve_config_path(std::iter::empty(), cwd.path()).expect_err("missing config should fail");
+        let error = resolve_config_path(std::iter::empty(), cwd.path())
+            .expect_err("missing config should fail");
 
         assert!(error.contains("Configuration path argument is required"));
     }

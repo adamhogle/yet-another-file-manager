@@ -3,8 +3,8 @@ use std::fs;
 use std::path::Path;
 
 use backend::ApiDoc;
-use utoipa::openapi::info::License;
 use utoipa::OpenApi;
+use utoipa::openapi::info::License;
 
 fn main() {
     let output_path = env::args()
@@ -13,9 +13,8 @@ fn main() {
 
     let mut openapi = ApiDoc::openapi();
     openapi.info.title = "Yet Another File Manager".to_string();
-    openapi.info.description = Some(
-        "A web-based file manager for self-hosted local file sharing.".to_string(),
-    );
+    openapi.info.description =
+        Some("A web-based file manager for self-hosted local file sharing.".to_string());
     let mut license = License::new("AGPL-3.0-only");
     license.url = Some("https://www.gnu.org/licenses/agpl-3.0.txt".to_string());
     openapi.info.license = Some(license);

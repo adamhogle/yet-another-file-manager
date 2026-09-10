@@ -57,6 +57,10 @@ paths:
       responses:
         '200':
           description: File download stream
+        '206':
+          description: Partial content for a satisfiable Range request
+        '304':
+          description: Not modified; the If-None-Match validator matches
         '400':
           description: Invalid request
           content:
@@ -65,6 +69,12 @@ paths:
                 $ref: '#/components/schemas/PublicErrorResponse'
         '404':
           description: File not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublicErrorResponse'
+        '416':
+          description: Range not satisfiable
           content:
             application/json:
               schema:
@@ -93,12 +103,13 @@ components:
       required:
         - name
         - kind
-        - modifiedAt
       properties:
         kind:
           $ref: '#/components/schemas/EntryKind'
         modifiedAt:
-          type: string
+          type:
+            - string
+            - 'null'
         name:
           type: string
         sizeBytes:

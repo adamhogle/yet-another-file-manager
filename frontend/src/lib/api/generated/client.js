@@ -1,7 +1,7 @@
 // AUTO-GENERATED FILE. DO NOT EDIT.
 // Source: api/openapi.yaml
 
-export const DEFAULT_BASE_URL = 'http://localhost:8080';
+export const DEFAULT_BASE_URL = '';
 
 export async function getApiV1Directory(baseUrl = DEFAULT_BASE_URL, query = {}, init = {}) {
   const searchParams = new URLSearchParams();
@@ -26,7 +26,16 @@ export async function getApiV1Directory(baseUrl = DEFAULT_BASE_URL, query = {}, 
   );
 
   if (!response.ok) {
-    throw new Error(`Request failed: GET /api/v1/directory -> ${response.status}`);
+    let message = `Request failed: GET /api/v1/directory -> ${response.status}`;
+    try {
+      const body = await response.json();
+      if (body && typeof body.message === 'string' && body.message) {
+        message = body.message;
+      }
+    } catch {
+      // Non-JSON body: keep the fallback message.
+    }
+    throw new Error(message);
   }
 
   return response.json();
@@ -55,7 +64,16 @@ export async function getApiV1Download(baseUrl = DEFAULT_BASE_URL, query = {}, i
   );
 
   if (!response.ok) {
-    throw new Error(`Request failed: GET /api/v1/download -> ${response.status}`);
+    let message = `Request failed: GET /api/v1/download -> ${response.status}`;
+    try {
+      const body = await response.json();
+      if (body && typeof body.message === 'string' && body.message) {
+        message = body.message;
+      }
+    } catch {
+      // Non-JSON body: keep the fallback message.
+    }
+    throw new Error(message);
   }
 
   return response.blob();
@@ -81,7 +99,16 @@ export async function getApiV1Health(baseUrl = DEFAULT_BASE_URL, query = {}, ini
   });
 
   if (!response.ok) {
-    throw new Error(`Request failed: GET /api/v1/health -> ${response.status}`);
+    let message = `Request failed: GET /api/v1/health -> ${response.status}`;
+    try {
+      const body = await response.json();
+      if (body && typeof body.message === 'string' && body.message) {
+        message = body.message;
+      }
+    } catch {
+      // Non-JSON body: keep the fallback message.
+    }
+    throw new Error(message);
   }
 
   return response.json();

@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   quality:
     runs-on: ubuntu-latest
@@ -39,6 +43,17 @@ jobs:
           toolchain: ${{ steps.rust-pin.outputs.channel }}
           components: clippy, rustfmt
 
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend
+
+      - name: Clippy
+        run: cd backend && cargo clippy -- -D warnings
+
+      - name: Format check
+        run: cd backend && cargo fmt --check
+
       - name: Install dependencies
         run: npm ci
 
@@ -57,6 +72,14 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      - name: Dependency advisories
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: backend/Cargo.toml
+
+      - name: npm audit
+        run: npm audit --audit-level=high && npm audit --audit-level=high --prefix frontend
+
       - name: Tests
         run: npm run test
 
@@ -64,6 +87,7 @@ jobs:
         run: npm run build
 
   docker-image:
+    needs: [quality]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:

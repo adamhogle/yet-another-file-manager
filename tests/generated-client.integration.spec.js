@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -9,32 +10,40 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { getApiV1Directory, getApiV1Health } from '../frontend/src/lib/api/generated/client.js';
 
 const repoRoot = process.cwd();
+const READINESS_BUDGET_MS = 150_000;
+const LISTEN_LINE_PATTERN = /backend listening on http:\/\/\S+:(\d+)/;
+const ANSI_PATTERN = /\u001B\[[0-9;]*m/g;
 
 let backendProcess;
+let backendStdout;
 let tempDirectory;
 let baseUrl;
 
-async function runCommand(command, args, options = {}) {
-  await new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
-      stdio: 'inherit',
-      ...options
-    });
-
-    child.on('error', reject);
-    child.on('exit', (code) => {
-      if (code === 0) {
-        resolve();
-        return;
-      }
-
-      reject(new Error(`Command failed: ${command} ${args.join(' ')} (exit ${code ?? 'null'})`));
-    });
-  });
+function stripAnsiEscapes(text) {
+  return text.replace(ANSI_PATTERN, '');
 }
 
-async function waitForBackendReady(url) {
-  for (let attempt = 0; attempt < 60; attempt += 1) {
+async function waitForListenPort(startedAt) {
+  const deadline = startedAt + READINESS_BUDGET_MS;
+
+  while (Date.now() < deadline) {
+    const match = LISTEN_LINE_PATTERN.exec(stripAnsiEscapes(backendStdout));
+    if (match) {
+      return Number(match[1]);
+    }
+
+    await delay(250);
+  }
+
+  throw new Error(
+    `Backend did not report "backend listening on http://<address>:<port>" within ${READINESS_BUDGET_MS}ms`
+  );
+}
+
+async function waitForBackendReady(url, startedAt) {
+  const deadline = startedAt + READINESS_BUDGET_MS;
+
+  while (Date.now() < deadline) {
     try {
       const health = await getApiV1Health(url);
       if (health?.status === 'ok') {
@@ -47,10 +56,38 @@ async function waitForBackendReady(url) {
     await delay(500);
   }
 
-  throw new Error('Backend did not become ready in time');
+  throw new Error(`Backend did not become ready at ${url} within ${READINESS_BUDGET_MS}ms`);
+}
+
+function waitForExit(child, timeoutMs) {
+  return new Promise((resolve) => {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      resolve(true);
+      return;
+    }
+
+    const timer = setTimeout(() => resolve(false), timeoutMs);
+    child.once('exit', () => {
+      clearTimeout(timer);
+      resolve(true);
+    });
+  });
+}
+
+function signalBackendGroup(signal) {
+  // The backend spawns detached as a process-group leader because `cargo run`
+  // wraps the actual binary and killing only the wrapper would orphan it. A
+  // negative pid signals the whole group so no cargo/rustc child survives.
+  try {
+    process.kill(-backendProcess.pid, signal);
+  } catch {
+    // The process group is already gone.
+  }
 }
 
 beforeAll(async () => {
+  const startedAt = Date.now();
+
   tempDirectory = await mkdtemp(path.join(os.tmpdir(), 'yafm-integration-'));
   const sharedRoot = path.join(tempDirectory, 'share');
   const projectsDir = path.join(sharedRoot, 'projects');
@@ -58,38 +95,43 @@ beforeAll(async () => {
 
   await mkdir(projectsDir, { recursive: true });
   await writeFile(path.join(projectsDir, 'demo.txt'), 'hello from integration test');
-  const port = 18080;
-  baseUrl = `http://127.0.0.1:${port}`;
 
+  // listenPort: 0 lets the OS pick a free port; the backend reports the actual
+  // assigned port on stdout and the spec connects the client to it.
   await writeFile(
     configPath,
-    `sharedRoot: ${sharedRoot}\nshowHidden: false\nlistenAddress: 127.0.0.1\nlistenPort: ${port}\n`
+    `sharedRoot: "${sharedRoot}"\nshowHidden: false\nlistenAddress: 127.0.0.1\nlistenPort: 0\n`
   );
-
-  await runCommand('npm', ['run', 'frontend:build'], { cwd: repoRoot });
 
   backendProcess = spawn('cargo', ['run', '--bin', 'backend', '--', configPath], {
     cwd: path.join(repoRoot, 'backend'),
     env: process.env,
+    detached: true,
     stdio: ['ignore', 'pipe', 'pipe']
   });
 
+  backendStdout = '';
   backendProcess.stdout.on('data', (chunk) => {
+    backendStdout += chunk;
     process.stdout.write(`[backend] ${chunk}`);
   });
   backendProcess.stderr.on('data', (chunk) => {
     process.stderr.write(`[backend] ${chunk}`);
   });
 
-  await waitForBackendReady(baseUrl);
+  const port = await waitForListenPort(startedAt);
+  baseUrl = `http://127.0.0.1:${port}`;
+
+  await waitForBackendReady(baseUrl, startedAt);
 }, 180000);
 
 afterAll(async () => {
-  if (backendProcess && !backendProcess.killed) {
-    backendProcess.kill('SIGTERM');
-    await delay(300);
-    if (!backendProcess.killed) {
-      backendProcess.kill('SIGKILL');
+  if (backendProcess?.pid) {
+    signalBackendGroup('SIGTERM');
+
+    if (!(await waitForExit(backendProcess, 3000))) {
+      signalBackendGroup('SIGKILL');
+      await waitForExit(backendProcess, 3000);
     }
   }
 
@@ -98,7 +140,16 @@ afterAll(async () => {
   }
 });
 
-describe('generated client integration', () => {
+const hasFrontendDist = existsSync(path.join(repoRoot, 'frontend', 'dist'));
+
+if (!hasFrontendDist) {
+  // vitest suppresses console output for skipped suites, so the reason is written directly.
+  process.stderr.write(
+    'Skipping the integration spec because frontend/dist is missing. Build it with "npm run frontend:build" and re-run.\n'
+  );
+}
+
+describe.skipIf(!hasFrontendDist)('generated client integration', () => {
   it('fetches directory data from the live backend', async () => {
     const listing = await getApiV1Directory(baseUrl, { p: 'projects' });
 
@@ -116,7 +167,7 @@ describe('generated client integration', () => {
 
   it('surfaces backend validation errors for invalid paths', async () => {
     await expect(getApiV1Directory(baseUrl, { p: '../secret' })).rejects.toThrow(
-      'Request failed: GET /api/v1/directory -> 404'
+      'The requested directory could not be found.'
     );
   });
 });

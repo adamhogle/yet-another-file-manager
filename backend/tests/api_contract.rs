@@ -21,6 +21,8 @@ async fn directory_endpoint_matches_contract_shape_and_status_codes() {
 
     fs::create_dir_all(&docs_dir).expect("create docs dir");
     fs::write(docs_dir.join("demo.txt"), "hello").expect("write demo file");
+    // showHidden defaults to false: the dotfile must be filtered from the listing.
+    fs::write(docs_dir.join(".dotfile.txt"), "hidden").expect("write dotfile");
     write_test_config(&config_path, &shared_root);
 
     backend::initialize_app_config(&config_path).expect("initialize app config");
@@ -52,6 +54,11 @@ async fn directory_endpoint_matches_contract_shape_and_status_codes() {
     assert_eq!(json["currentPath"], "docs");
     assert_eq!(json["parentPath"], "");
     assert!(json["entries"].is_array());
+    assert_eq!(
+        json["entries"].as_array().expect("entries").len(),
+        1,
+        "the dotfile must be filtered when showHidden is false"
+    );
 
     let first_entry = &json["entries"][0];
     assert_eq!(first_entry["name"], "demo.txt");
@@ -227,6 +234,61 @@ async fn embedded_frontend_serves_index_and_preserves_unknown_api_404() {
     let root_html = String::from_utf8(root_bytes.to_vec()).expect("root html utf8");
     assert!(root_html.contains("<div id=\"app\"></div>"));
 
+    // An unknown non-API asset falls back to the embedded index.html so the SPA
+    // router can render its own view for it.
+    let unknown_asset_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/missing-asset.css")
+                .method("GET")
+                .body(Body::empty())
+                .expect("unknown asset request"),
+        )
+        .await
+        .expect("unknown asset response");
+
+    assert_eq!(unknown_asset_response.status(), StatusCode::OK);
+    assert_eq!(
+        unknown_asset_response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok()),
+        Some("text/html")
+    );
+
+    let unknown_asset_bytes = unknown_asset_response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect unknown asset body")
+        .to_bytes();
+    let unknown_asset_html =
+        String::from_utf8(unknown_asset_bytes.to_vec()).expect("unknown asset html utf8");
+    assert!(unknown_asset_html.contains("<div id=\"app\"></div>"));
+
+    // Known embedded non-API assets are served directly with their own media type.
+    let favicon_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/favicon.svg")
+                .method("GET")
+                .body(Body::empty())
+                .expect("favicon request"),
+        )
+        .await
+        .expect("favicon response");
+
+    assert_eq!(favicon_response.status(), StatusCode::OK);
+    assert_eq!(
+        favicon_response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok()),
+        Some("image/svg+xml")
+    );
+
     let unknown_api_response = app
         .oneshot(
             Request::builder()
@@ -241,4 +303,31 @@ async fn embedded_frontend_serves_index_and_preserves_unknown_api_404() {
     assert_eq!(unknown_api_response.status(), StatusCode::NOT_FOUND);
 }
 
+#[tokio::test]
+async fn health_endpoint_reports_ok_and_the_service_name() {
+    let app = backend::app_router();
 
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/health")
+                .method("GET")
+                .body(Body::empty())
+                .expect("health request"),
+        )
+        .await
+        .expect("health response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect body")
+        .to_bytes();
+    let json: Value = serde_json::from_slice(&bytes).expect("json body");
+
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["service"], "backend");
+}

@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue';
 import { buildDownloadHref, fetchDirectory, toChildPath } from './lib/api/client';
+import { formatSize, formatModified } from './lib/format.js';
 
 const title = 'Yet Another File Manager';
 const repositoryUrl = 'https://github.com/adamhogle/yet-another-file-manager';
@@ -23,40 +24,6 @@ const breadcrumbs = computed(() => {
 
   return items;
 });
-
-const dateFormatter = new Intl.DateTimeFormat(undefined, {
-  year: 'numeric',
-  month: '2-digit',
-  day: '2-digit',
-  hour: '2-digit',
-  minute: '2-digit'
-});
-
-function formatSize(sizeBytes) {
-  if (sizeBytes === null) {
-    return '';
-  }
-
-  if (sizeBytes < 1024) {
-    return `${sizeBytes} B`;
-  }
-
-  const units = ['KB', 'MB', 'GB', 'TB'];
-  let value = sizeBytes / 1024;
-  let unitIndex = 0;
-
-  while (value >= 1024 && unitIndex < units.length - 1) {
-    value /= 1024;
-    unitIndex += 1;
-  }
-
-  const precision = value >= 100 ? 0 : value >= 10 ? 1 : 2;
-  return `${value.toFixed(precision)} ${units[unitIndex]}`;
-}
-
-function formatModified(isoDate) {
-  return dateFormatter.format(new Date(isoDate));
-}
 
 function readPathFromUrl() {
   return new URLSearchParams(window.location.search).get('p') ?? '';
