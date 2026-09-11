@@ -33,9 +33,24 @@ FROM base AS build
 
 WORKDIR /build
 
-COPY . .
-
+# Dependency layers come first (manifests only) so Docker layer caching keeps
+# them valid across source edits. A commit that touches only backend/src/* then
+# reuses the cached npm ci and cargo dependency layers, so the final cargo build
+# is incremental instead of a full clean rebuild.
+COPY package.json package-lock.json ./
+COPY frontend/package.json frontend/package-lock.json ./frontend/
 RUN npm ci && cd frontend && npm ci
+
+COPY backend/Cargo.toml backend/Cargo.lock ./backend/
+# Stub sources so cargo compiles the full dependency graph into a cached layer;
+# the real sources are copied afterwards and only the backend crate recompiles.
+RUN mkdir -p backend/src/bin \
+    && printf 'fn main() {}\n' > backend/src/main.rs \
+    && cp backend/src/main.rs backend/src/bin/openapi.rs
+RUN cd backend && cargo build --release --bin backend
+
+# Real sources last: only the backend crate (lib + bins) recompiles after this.
+COPY . .
 
 RUN npm run frontend:build
 
