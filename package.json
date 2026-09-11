@@ -27,6 +27,7 @@
     "test:integration": "vitest --config vitest.config.js --run"
   },
   "devDependencies": {
+    "@types/node": "^22.19.19",
     "@vue/eslint-config-typescript": "^14.9.0",
     "eslint": "^10.10.0",
     "eslint-config-prettier": "^10.1.8",
