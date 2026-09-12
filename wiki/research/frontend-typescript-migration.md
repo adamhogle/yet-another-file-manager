@@ -353,7 +353,7 @@ Every doc that mentions the frontend tooling; items 1–3 are the ones that go
    update `tests/generated-client.integration.spec.js:13` if the file is
    renamed to `.ts`.
 9. **Vitest at root owns `tests/**`**; frontend has no test script — don't
-move tests into `frontend/`silently, and don't forget`vitest.config.js`'s glob already covers `.ts`.
+   move tests into `frontend/`silently, and don't forget`vitest.config.js`'s glob already covers `.ts`.
 10. **`contract:check` also diffs `api/openapi.yaml`** — its `openapi:generate`
     script's `npx prettier` on 9p fails locally (pre-existing A16 quirk,
     unrelated to this migration); only the client side is affected here.
