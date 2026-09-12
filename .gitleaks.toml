@@ -11,3 +11,10 @@ useDefault = true
 paths = [
   '''backend/tests/oidc_flow.rs'''
 ]
+# Test fixtures that deliberately look like secrets but are not. The signing
+# key below is a self-documenting placeholder used by the config-parser unit
+# tests (see backend/src/lib.rs and config/yafm.config.example.yaml).
+regexes = [
+  '''replace-signing-key-0123456789abcdef''',
+  '''replace-me'''
+]
