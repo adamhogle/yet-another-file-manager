@@ -31,7 +31,7 @@ As a maintainer, I want successful `main` builds to publish a versioned runtime 
 - Pull requests run the same image builds but do not publish to a registry.
 - Pushes to `main` publish the runtime image to `ghcr.io/adamhogle/yet-another-file-manager`.
 - Published tags include the computed version tag, the release-line tag, a SHA tag, and `latest`. Intermediate per-commit build tags are not releases.
-- Pushing a `v<version>` tag runs the `release` workflow: it verifies the tag matches `compute-version --plain`, republishes the image pinned to that version plus `latest`, and creates a GitHub Release with generated notes.
+- Pushing a `v<version>` tag runs the `release` workflow: it verifies the tag matches `node scripts/compute-version.mjs --plain`, republishes the image pinned to that version plus `latest`, and creates a GitHub Release with generated notes.
 
 ## Technical Notes
 
@@ -63,4 +63,4 @@ As a maintainer, I want successful `main` builds to publish a versioned runtime 
 
 ## Open Questions
 
-- None. Whether release tags should be published in addition to git-height versions is resolved: the `release` workflow publishes both on tag pushes.
+- None.

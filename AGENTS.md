@@ -42,7 +42,7 @@ CalVer: `YYYY.MM.N`, where `N` is the commit count since `version.json` was last
 ## CI
 
 - Checks: `quality` (lint, prettier, typecheck, tests, contract drift, audits), `secret-scan` (gitleaks), `docker-image` (builds the devcontainer and runtime targets).
-- `docker-image` runs on pull requests as well, but the GHCR publish, the toolchain assertion, and the runtime publish only run on `main` pushes. Docker-level validation of a PR therefore happens after merge.
+- `docker-image` runs on pull requests as well and builds both Docker targets; the GHCR publish and the devcontainer toolchain assertion only run on `main` pushes.
 - Never path-allowlist source files in `.gitleaks.toml`. Extend the allowlist with value regexes for test-fixture placeholders (for example `replace-me`). Real secrets never belong in the tree.
 - The quality job's lint step is `prettier --check .`; a prettier-dirty committed file breaks CI.
 

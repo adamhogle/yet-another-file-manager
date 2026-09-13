@@ -21,7 +21,7 @@ so container packaging issues are detected before merge and release.
 
 - On every push or pull request to `main`, CI runs quality checks and then builds the `devcontainer` and runtime Docker targets.
 - If either target cannot be built, the workflow fails.
-- GHCR publishing and the devcontainer toolchain assertion run only on `main` pushes, so Docker-level validation of a pull request happens after merge.
+- GHCR publishing and the devcontainer toolchain assertion run only on `main` pushes; pull requests still build and validate both Docker targets.
 - Builds are incremental: dependency layers are cached, so a source change recompiles only the backend crate instead of forcing a clean rebuild.
 
 ## API and Data Impact
