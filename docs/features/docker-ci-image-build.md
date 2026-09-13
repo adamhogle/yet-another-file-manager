@@ -33,7 +33,7 @@ so container packaging issues are detected before merge and release.
 
 The build stage compiles in dependency layers so cached layers survive source changes:
 
-1. Copy manifests and lockfiles (`package.json`, `frontend/package.json`, `backend/Cargo.toml` and `Cargo.lock`) and run `npm ci` for both root and frontend.
+1. Copy the Node manifests and lockfiles (`package.json`, `frontend/package.json`) and run `npm ci` for both root and frontend.
 2. Copy the backend manifest, generate stub sources (an empty `src/main.rs` and `src/bin/openapi.rs`, no `lib.rs`), and run `cargo build --release --bin backend`. This bakes the full dependency graph into a cached `target/` layer. `rust-embed` allows the missing `frontend/dist` folder, so no frontend build is needed in this layer.
 3. `COPY . .` brings in real sources. The final build recompiles only the backend crate.
 

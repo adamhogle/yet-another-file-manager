@@ -12,7 +12,7 @@ YAFM is a self-hosted web file manager with a Rust backend API, a Vue 3 frontend
 | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
 | `backend/`                        | Rust server, single crate. `src/lib.rs` (app and config), `src/main.rs` (bin), `src/auth.rs` (OIDC), `src/bin/openapi.rs` (spec generator). |
 | `frontend/`                       | Vue 3, TypeScript, zod. Own `package.json`.                                                                                                 |
-| `api/openapi.yaml`                | Contract source of truth. The typed client in `frontend/src/api/` is generated from it.                                                     |
+| `api/openapi.yaml`                | Contract source of truth. The typed client in `frontend/src/lib/api/` is generated from it.                                                    |
 | `tests/`                          | Vitest specs, including the generated-client integration spec.                                                                              |
 | `scripts/compute-version.mjs`     | Derives the version from git height.                                                                                                        |
 | `config/yafm.config.example.yaml` | Server configuration example.                                                                                                               |
