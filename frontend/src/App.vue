@@ -109,16 +109,21 @@ onMounted(() => {
         <p v-if="isLoading" class="empty-state">Loading directory...</p>
         <p v-else-if="entries.length === 0" class="empty-state">This directory is empty.</p>
 
-        <div v-else class="details-grid">
-          <div class="details-header details-row">
-            <span>Name</span>
-            <span>Size</span>
-            <span>Modified</span>
-            <span class="actions-header">Actions</span>
+        <div v-else class="details-grid" role="table" aria-label="Directory contents">
+          <div class="details-header details-row" role="row">
+            <span role="columnheader">Name</span>
+            <span role="columnheader">Size</span>
+            <span role="columnheader">Modified</span>
+            <span class="actions-header" role="columnheader">Actions</span>
           </div>
 
-          <div v-for="entry in entries" :key="`${entry.kind}:${entry.name}`" class="details-row">
-            <div class="name-cell">
+          <div
+            v-for="entry in entries"
+            :key="`${entry.kind}:${entry.name}`"
+            class="details-row"
+            role="row"
+          >
+            <div class="name-cell" role="cell">
               <button
                 v-if="entry.kind === 'directory'"
                 type="button"
@@ -129,9 +134,9 @@ onMounted(() => {
               </button>
               <span v-else class="entry-name">{{ entry.name }}</span>
             </div>
-            <span class="size-cell">{{ formatSize(entry.sizeBytes) }}</span>
-            <span class="date-cell">{{ formatModified(entry.modifiedAt) }}</span>
-            <span class="actions-cell">
+            <span class="size-cell" role="cell">{{ formatSize(entry.sizeBytes) }}</span>
+            <span class="date-cell" role="cell">{{ formatModified(entry.modifiedAt) }}</span>
+            <span class="actions-cell" role="cell">
               <a
                 v-if="entry.kind === 'file'"
                 class="icon-action"
@@ -371,10 +376,18 @@ h1 {
   /* The four-column table cannot fit a phone viewport: its minimum track
      widths exceed the available space and push the actions cell outside
      the panel. Stack each row instead: name and action on the first line,
-     size and modified on the second. The header row is hidden because the
-     stacked lines are self-describing. */
+     size and modified on the second. The header row is visually hidden
+     rather than removed so the table roles keep their column labels in
+     the accessibility tree. */
   .details-header {
-    display: none;
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
 
   .details-row {

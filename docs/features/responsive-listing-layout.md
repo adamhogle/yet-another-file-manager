@@ -17,7 +17,6 @@ As a visitor browsing the file manager from a phone, I want the directory listin
 - In scope:
   - Stacked listing layout below 640px: hidden header row, name and actions on the first line, size and modified on the second line.
   - Empty size cell for entries without a `sizeBytes` value.
-- In scope:
   - Screenshot-based verification at 320px, 390px, 768px and desktop widths.
 
 ## Non-Goals
