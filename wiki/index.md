@@ -5,10 +5,11 @@ findings or decisions that outlive a single session.
 
 ## Pages
 
-| Page                                                                                         | Summary                                                                                                                                                                                                           | Status |
-| -------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ |
-| [Frontend TypeScript + ESLint migration research](research/frontend-typescript-migration.md) | Map of the Vue 3 + Vite frontend for the TypeScript and ESLint migration: App.vue anatomy, the generated-client TS-or-JS question, tooling interop with the prettier gate, API types, 9p constraints, docs drift. | Active |
-| [Plan: Frontend TypeScript + ESLint migration](plans/frontend-typescript.md)                 | Living plan page for the frontend TypeScript + zod migration and ESLint verification: locked decisions, ISC, architecture, and the strictly sequential todo list (T1–T7). Draws from the research page above.     | Done   |
+| Page                                                                                         | Summary                                                                                                                                                                                                                                           | Status |
+| -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ |
+| [Download throughput investigation](research/download-throughput.md)                         | Investigation of the reported 800 KB/s download throughput: the serving code streams at 761 MB/s locally on a 1 GB file, so the cause is environmental. Includes a boundary-by-boundary diagnostic script and a throughput regression guard test. | Active |
+| [Frontend TypeScript + ESLint migration research](research/frontend-typescript-migration.md) | Map of the Vue 3 + Vite frontend for the TypeScript and ESLint migration: App.vue anatomy, the generated-client TS-or-JS question, tooling interop with the prettier gate, API types, 9p constraints, docs drift.                                 | Active |
+| [Plan: Frontend TypeScript + ESLint migration](plans/frontend-typescript.md)                 | Living plan page for the frontend TypeScript + zod migration and ESLint verification: locked decisions, ISC, architecture, and the strictly sequential todo list (T1–T7). Draws from the research page above.                                     | Done   |
 
 ## Prior Runs (legacy artifacts)
 
