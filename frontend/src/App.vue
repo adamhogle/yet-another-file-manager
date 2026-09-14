@@ -390,7 +390,7 @@ h1 {
     white-space: nowrap;
   }
 
-  .details-row {
+  .details-row:not(.details-header) {
     grid-template-columns: minmax(0, 1fr) auto;
     grid-template-areas:
       'name actions'
