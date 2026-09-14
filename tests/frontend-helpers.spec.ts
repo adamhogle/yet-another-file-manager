@@ -35,9 +35,9 @@ describe('formatSize', () => {
     expect(formatSize(2053.12)).toBe('2.00 KB');
   });
 
-  it('passes negative input through in the byte range and falls back for null/undefined', () => {
+  it('passes negative input through in the byte range and renders empty for missing input', () => {
     expect(formatSize(-5)).toBe('-5 B');
-    expect(formatSize(undefined)).toBe('NaN KB');
+    expect(formatSize(undefined)).toBe('');
     expect(formatSize(null)).toBe('');
   });
 });

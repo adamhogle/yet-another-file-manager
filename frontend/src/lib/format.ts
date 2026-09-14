@@ -7,13 +7,14 @@ const dateFormatter = new Intl.DateTimeFormat(undefined, {
 });
 
 export function formatSize(sizeBytes: number | null | undefined): string {
-  if (sizeBytes === null) {
+  // Missing input renders as empty rather than "NaN KB": directories carry
+  // no sizeBytes value, and a NaN display would show up in every directory
+  // row. Symmetric with formatModified's handling of absent timestamps.
+  if (sizeBytes === null || sizeBytes === undefined) {
     return '';
   }
 
-  // Undefined input deliberately reaches the NaN path below (asserted in tests):
-  // coalescing it to NaN keeps that behavior while making the arithmetic type-safe.
-  const bytes = sizeBytes ?? NaN;
+  const bytes = sizeBytes;
 
   if (bytes < 1024) {
     return `${bytes} B`;

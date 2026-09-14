@@ -368,8 +368,43 @@ h1 {
     font-size: 0.78rem;
   }
 
+  /* The four-column table cannot fit a phone viewport: its minimum track
+     widths exceed the available space and push the actions cell outside
+     the panel. Stack each row instead: name and action on the first line,
+     size and modified on the second. The header row is hidden because the
+     stacked lines are self-describing. */
+  .details-header {
+    display: none;
+  }
+
   .details-row {
-    grid-template-columns: minmax(10rem, 1fr) 5.5rem 7.7rem 2.6rem;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      'name actions'
+      'size date';
+    column-gap: 0.8rem;
+    row-gap: 0.15rem;
+    align-items: baseline;
+    min-height: 0;
+    padding: 0.5rem 0.6rem;
+  }
+
+  .name-cell {
+    grid-area: name;
+  }
+
+  .actions-cell {
+    grid-area: actions;
+    align-self: center;
+  }
+
+  .size-cell {
+    grid-area: size;
+    font-size: 0.75rem;
+  }
+
+  .date-cell {
+    grid-area: date;
     font-size: 0.75rem;
   }
 }
