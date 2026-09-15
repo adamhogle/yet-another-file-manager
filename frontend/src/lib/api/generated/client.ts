@@ -3,6 +3,16 @@
 
 import { z } from 'zod';
 
+export class ApiHttpError extends Error {
+  status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'ApiHttpError';
+    this.status = status;
+  }
+}
+
 export const DEFAULT_BASE_URL = '';
 
 export const EntryKindSchema = z.enum(['directory', 'file']);
@@ -28,6 +38,13 @@ export type HealthResponse = z.infer<typeof HealthResponseSchema>;
 
 export const PublicErrorResponseSchema = z.object({ message: z.string() });
 export type PublicErrorResponse = z.infer<typeof PublicErrorResponseSchema>;
+
+export const UserInfoResponseSchema = z.object({
+  displayName: z.string(),
+  email: z.string().nullable().optional(),
+  subject: z.string()
+});
+export type UserInfoResponse = z.infer<typeof UserInfoResponseSchema>;
 
 export async function getApiV1Directory(
   baseUrl: string = DEFAULT_BASE_URL,
@@ -65,7 +82,11 @@ export async function getApiV1Directory(
     } catch {
       // Non-JSON or non-conforming body: keep the fallback message.
     }
-    throw new Error(message);
+    // The HTTP status rides the error so callers can distinguish failure
+    // classes (the backend's 404 for hidden paths vs other errors). The
+    // message alone carries the backend's PublicErrorResponse text, which is
+    // deliberately shared between hidden and nonexistent paths.
+    throw new ApiHttpError(message, response.status);
   }
 
   return DirectoryListingSchema.parse(await response.json());
@@ -107,7 +128,11 @@ export async function getApiV1Download(
     } catch {
       // Non-JSON or non-conforming body: keep the fallback message.
     }
-    throw new Error(message);
+    // The HTTP status rides the error so callers can distinguish failure
+    // classes (the backend's 404 for hidden paths vs other errors). The
+    // message alone carries the backend's PublicErrorResponse text, which is
+    // deliberately shared between hidden and nonexistent paths.
+    throw new ApiHttpError(message, response.status);
   }
 
   return response.blob();
@@ -146,8 +171,58 @@ export async function getApiV1Health(
     } catch {
       // Non-JSON or non-conforming body: keep the fallback message.
     }
-    throw new Error(message);
+    // The HTTP status rides the error so callers can distinguish failure
+    // classes (the backend's 404 for hidden paths vs other errors). The
+    // message alone carries the backend's PublicErrorResponse text, which is
+    // deliberately shared between hidden and nonexistent paths.
+    throw new ApiHttpError(message, response.status);
   }
 
   return HealthResponseSchema.parse(await response.json());
+}
+
+export async function getApiV1UsersMe(
+  baseUrl: string = DEFAULT_BASE_URL,
+  query: Record<string, string | number | boolean | null | undefined> = {},
+  init: RequestInit = {}
+): Promise<UserInfoResponse> {
+  const searchParams = new URLSearchParams();
+  for (const [key, value] of Object.entries(query)) {
+    if (value === undefined || value === null || value === '') {
+      continue;
+    }
+
+    searchParams.set(key, String(value));
+  }
+
+  const queryString = searchParams.toString();
+  const response = await fetch(
+    `${baseUrl}/api/v1/users/me${queryString ? `?${queryString}` : ''}`,
+    {
+      ...init,
+      method: 'GET',
+      headers: {
+        ...(init.headers ?? {})
+      }
+    }
+  );
+
+  if (!response.ok) {
+    let message = `Request failed: GET /api/v1/users/me -> ${response.status}`;
+    try {
+      const body = PublicErrorResponseSchema.parse(await response.json());
+      if (body.message) {
+        message = body.message;
+      }
+    } catch {
+      // Non-JSON or non-conforming body: keep the fallback message.
+    }
+    // The HTTP status rides the error so callers can distinguish failure
+    // classes (the backend's 404 for hidden paths vs other errors). The
+    // message alone carries the backend's PublicErrorResponse text, which is
+    // deliberately shared between hidden and nonexistent paths.
+    throw new ApiHttpError(message, response.status);
+  }
+
+  return UserInfoResponseSchema.parse(await response.json());
 }

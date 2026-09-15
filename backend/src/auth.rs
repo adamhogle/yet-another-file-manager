@@ -12,14 +12,19 @@ use axum::response::{IntoResponse, Response};
 use cookie::time::Duration;
 use cookie::{Cookie, CookieJar, Key, SameSite};
 use once_cell::sync::OnceCell;
-use openidconnect::core::{CoreAuthenticationFlow, CoreClient};
-use openidconnect::{
-    AuthorizationCode, ClaimsVerificationError, ClientId, ClientSecret, CsrfToken, EndSessionUrl,
-    EndpointMaybeSet, EndpointNotSet, EndpointSet, IssuerUrl, Nonce, PkceCodeChallenge,
-    PkceCodeVerifier, ProviderMetadataWithLogout, RedirectUrl, Scope, SignatureVerificationError,
-    TokenResponse,
+use openidconnect::core::{
+    CoreAuthDisplay, CoreAuthPrompt, CoreAuthenticationFlow, CoreErrorResponseType,
+    CoreGenderClaim, CoreJsonWebKey, CoreJweContentEncryptionAlgorithm, CoreJwsSigningAlgorithm,
+    CoreRevocableToken, CoreRevocationErrorResponse, CoreTokenIntrospectionResponse, CoreTokenType,
 };
-use serde::Deserialize;
+use openidconnect::{
+    AdditionalClaims, AuthorizationCode, ClaimsVerificationError, Client, ClientId, ClientSecret,
+    CsrfToken, EmptyExtraTokenFields, EndSessionUrl, EndpointMaybeSet, EndpointNotSet, EndpointSet,
+    IdTokenClaims, IdTokenFields, IssuerUrl, Nonce, PkceCodeChallenge, PkceCodeVerifier,
+    ProviderMetadataWithLogout, RedirectUrl, Scope, SignatureVerificationError,
+    StandardErrorResponse, StandardTokenResponse, TokenResponse,
+};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use url::Url;
 
@@ -62,6 +67,35 @@ impl std::fmt::Debug for AuthOidcConfig {
             .finish()
     }
 }
+
+/// The additional ID-token claims YAFM reads beyond the standard set: the
+/// `groups` claim feeds the group-based access control (ADR-0005). authentik
+/// puts `groups` in the ID token when the `groups` scope is added to the
+/// application's configuration; a missing claim means no group-based grants
+/// apply. openidconnect's `CoreClient` discards extra claims
+/// (`EmptyAdditionalClaims`), so the discovered client below is a custom
+/// type alias carrying this type.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct ExtraIdTokenClaims {
+    #[serde(default)]
+    groups: Option<Vec<String>>,
+}
+
+impl AdditionalClaims for ExtraIdTokenClaims {}
+
+/// The token-response and ID-token types carrying `ExtraIdTokenClaims`.
+/// Mirrors the `Core` shapes with only the claims type swapped: the verifier
+/// (`IdTokenVerifier<'a, CoreJsonWebKey>`) is independent of the claims type,
+/// so validation is unchanged.
+type ExtraIdTokenFields = IdTokenFields<
+    ExtraIdTokenClaims,
+    EmptyExtraTokenFields,
+    CoreGenderClaim,
+    CoreJweContentEncryptionAlgorithm,
+    CoreJwsSigningAlgorithm,
+>;
+
+type ExtraTokenResponse = StandardTokenResponse<ExtraIdTokenFields, CoreTokenType>;
 
 /// The process-global authentication state. Production initializes it once at
 /// startup from the validated config; the OnceCell mechanics (first successful
@@ -124,6 +158,13 @@ pub const SESSION_MAX_AGE_SECONDS: u64 = 12 * 60 * 60;
 /// the authentik round trip and is consumed by the callback.
 pub const LOGIN_MAX_AGE_SECONDS: u64 = 10 * 60;
 
+/// The cookie-size budget the callback warns against: browsers cap a cookie
+/// at ~4 KB and silently drop oversized Set-Cookie values, so an identity
+/// payload with many groups can produce a login that looks like a bug. The
+/// number is the commonly-quoted 4093-byte per-cookie cap (name=value
+/// included).
+const SESSION_COOKIE_BUDGET_BYTES: usize = 4093;
+
 /// The three auth endpoint paths, exempt from the gate so the login flow can
 /// reach them. The routes are registered in `app_router()` (login, callback
 /// and logout) alongside the data endpoints.
@@ -131,10 +172,24 @@ pub const LOGIN_PATH: &str = "/api/v1/auth/login";
 pub const CALLBACK_PATH: &str = "/api/v1/auth/callback";
 pub const LOGOUT_PATH: &str = "/api/v1/auth/logout";
 
-/// Version tag inside the session-cookie payload (`<version>:<exp>`). Bumping
-/// it invalidates every outstanding session so old cookies re-login instead of
-/// failing to parse.
-const SESSION_PAYLOAD_VERSION: &str = "v1";
+/// Version tag inside the session-cookie payload
+/// (`<version>:<exp>:<subject>:<display>:<email>:<groups>`). Bumping it
+/// invalidates every outstanding session so old cookies re-login instead of
+/// failing to parse. `v2` embeds the identity claims (ADR-0005); `v1`
+/// carried only `<version>:<exp>`.
+const SESSION_PAYLOAD_VERSION: &str = "v2";
+
+/// Field separator of the session-cookie payload. The subject, display name,
+/// email and groups fields are percent-encoded before joining, so a
+/// conforming value never contains a raw `:` and `splitn` round-trips them
+/// exactly.
+const SESSION_FIELD_SEPARATOR: &str = ":";
+
+/// Separator joining the individually percent-encoded group entries. Each
+/// encoded group never contains a raw `,` (`urlencoding::encode` escapes
+/// it to `%2C`), so the raw `,` only ever appears as a separator and the
+/// encoded groups field splits on it BEFORE each entry is decoded.
+const SESSION_GROUPS_SEPARATOR: &str = ",";
 
 /// Field separator of the login-cookie payload
 /// (`<state>|<nonce>|<verifier>|<returnTo>`). The three OIDC fields are
@@ -177,6 +232,21 @@ pub struct SessionCookieJar {
     secure: bool,
 }
 
+/// The authenticated identity carried by the session cookie: the ID token's
+/// subject, the display claims and the groups claim, captured at the callback
+/// after ID-token validation (ADR-0005). The gate inserts it into request
+/// extensions on every authenticated request; `users/me` reads it out.
+/// Deliberately no `Debug`: the claims are user data, and one future
+/// `tracing::debug!` must not log them.
+#[derive(Clone)]
+pub struct SessionClaims {
+    pub subject: String,
+    pub display_name: String,
+    /// Empty when the provider sent no `email` claim.
+    pub email: String,
+    pub groups: Vec<String>,
+}
+
 /// Data carried by the short-lived login cookie: the OIDC state, nonce and
 /// PKCE code verifier are consumed by the callback to validate the flow, and
 /// `return_to` is the same-origin relative path to redirect to after login.
@@ -212,25 +282,41 @@ impl SessionCookieJar {
     }
 
     /// Mints a signed session cookie whose payload records the payload format
-    /// version and the unix-seconds expiration. The caller serializes the
-    /// returned cookie with `Cookie::encoded()` into a Set-Cookie header.
-    pub fn mint_session(&self, max_age_seconds: u64) -> Cookie<'static> {
+    /// version, the unix-seconds expiration and the authenticated identity
+    /// claims (ADR-0005). Each claim field is percent-encoded so a value
+    /// containing the separator cannot forge field boundaries. The caller
+    /// serializes the returned cookie with `Cookie::encoded()` into a
+    /// Set-Cookie header.
+    pub fn mint_session(&self, max_age_seconds: u64, claims: &SessionClaims) -> Cookie<'static> {
         let expiration = unix_seconds_now() + max_age_seconds;
-        let payload = format!("{SESSION_PAYLOAD_VERSION}:{expiration}");
+        let payload = [
+            SESSION_PAYLOAD_VERSION.to_string(),
+            expiration.to_string(),
+            encode_claim(&claims.subject),
+            encode_claim(&claims.display_name),
+            encode_claim(&claims.email),
+            claims
+                .groups
+                .iter()
+                .map(|group| encode_claim(group))
+                .collect::<Vec<_>>()
+                .join(SESSION_GROUPS_SEPARATOR),
+        ]
+        .join(SESSION_FIELD_SEPARATOR);
         self.signed_cookie(SESSION_COOKIE_NAME, payload, max_age_seconds)
     }
 
     /// Verifies the session value carried by the `Cookie` request header:
-    /// parses the header, verifies the signature with the derived key and
-    /// checks the expiration. The error describes the problem so logs and
-    /// tests stay actionable.
-    pub fn verify_session(&self, header_value: &str) -> Result<(), String> {
+    /// parses the header, verifies the signature with the derived key, checks
+    /// the expiration and decodes the identity claims. The error describes the
+    /// problem so logs and tests stay actionable.
+    pub fn verify_session(&self, header_value: &str) -> Result<SessionClaims, String> {
         let cookie = extract_cookie(header_value, SESSION_COOKIE_NAME)
             .ok_or_else(|| "The session cookie is missing.".to_string())?;
         let value = self
             .verify_in_jar(cookie, SESSION_COOKIE_NAME)
             .ok_or_else(|| "The session cookie signature is invalid.".to_string())?;
-        check_session_payload(&value)
+        parse_session_payload(&value)
     }
 
     /// A Max-Age=0 session cookie so the browser drops the session immediately.
@@ -324,9 +410,34 @@ fn clear_cookie(name: &'static str, secure: bool) -> Cookie<'static> {
         .build()
 }
 
-fn check_session_payload(value: &str) -> Result<(), String> {
-    let (version, expiration) = value
-        .split_once(':')
+/// Percent-encodes one session-payload claim field. `urlencoding::encode`
+/// percent-encodes the field separator (`:`) and the groups separator (`,`),
+/// so an encoded value cannot forge a field or group boundary.
+fn encode_claim(value: &str) -> String {
+    urlencoding::encode(value).into_owned()
+}
+
+/// Percent-decodes one session-payload claim field. Malformed escapes pass
+/// through literally (matching the WHATWG decode behavior); bytes that are
+/// not valid UTF-8 reject the payload.
+fn decode_claim(value: &str) -> Result<String, String> {
+    urlencoding::decode(value)
+        .map(|decoded| decoded.into_owned())
+        .map_err(|_| "The session cookie is not recognizable.".to_string())
+}
+
+/// Parses the session-cookie payload into the expiration and the identity
+/// claims. The version must match, the expiration must be a future unix-seconds
+/// value, and every claim field must decode; the subject is required (the ID
+/// token's `sub` claim is mandatory), display name, email and groups may be
+/// empty.
+fn parse_session_payload(value: &str) -> Result<SessionClaims, String> {
+    let mut fields = value.splitn(6, SESSION_FIELD_SEPARATOR);
+    let version = fields
+        .next()
+        .ok_or_else(|| "The session cookie is not recognizable.".to_string())?;
+    let expiration = fields
+        .next()
         .ok_or_else(|| "The session cookie is not recognizable.".to_string())?;
     if version != SESSION_PAYLOAD_VERSION {
         return Err("The session cookie is not recognizable.".to_string());
@@ -337,7 +448,45 @@ fn check_session_payload(value: &str) -> Result<(), String> {
     if expiration <= unix_seconds_now() {
         return Err("The session cookie has expired.".to_string());
     }
-    Ok(())
+
+    let subject = fields
+        .next()
+        .ok_or_else(|| "The session cookie is not recognizable.".to_string())?;
+    let display_name = fields
+        .next()
+        .ok_or_else(|| "The session cookie is not recognizable.".to_string())?;
+    let email = fields
+        .next()
+        .ok_or_else(|| "The session cookie is not recognizable.".to_string())?;
+    let groups = fields
+        .next()
+        .ok_or_else(|| "The session cookie is not recognizable.".to_string())?;
+
+    let subject = decode_claim(subject)?;
+    if subject.is_empty() {
+        return Err("The session cookie is not recognizable.".to_string());
+    }
+    let display_name = decode_claim(display_name)?;
+    let email = decode_claim(email)?;
+    // The groups field is the individually percent-encoded entries joined by
+    // a raw `,`: the raw comma only ever appears as a separator, so the field
+    // splits BEFORE each entry is decoded and a group name containing a comma
+    // round-trips exactly. An empty field means no groups.
+    let groups = if groups.is_empty() {
+        Vec::new()
+    } else {
+        groups
+            .split(SESSION_GROUPS_SEPARATOR)
+            .map(decode_claim)
+            .collect::<Result<Vec<_>, _>>()?
+    };
+
+    Ok(SessionClaims {
+        subject,
+        display_name,
+        email,
+        groups,
+    })
 }
 
 fn parse_login_payload(value: &str) -> Result<LoginCookieData, String> {
@@ -371,7 +520,7 @@ fn unix_seconds_now() -> u64 {
 /// parses the message), 302 redirect for browser navigations (the SPA shell,
 /// assets and downloads are plain navigations that cannot complete a
 /// cross-origin fetch chain).
-pub async fn auth_gate(req: Request, next: Next) -> Response {
+pub async fn auth_gate(mut req: Request, next: Next) -> Response {
     match gate_decision(
         get_auth_state(),
         req.uri().path(),
@@ -380,6 +529,13 @@ pub async fn auth_gate(req: Request, next: Next) -> Response {
             .and_then(|value| value.to_str().ok()),
     ) {
         GateDecision::PassThrough => next.run(req).await,
+        GateDecision::Authenticated(claims) => {
+            // The authenticated identity rides request extensions: handlers
+            // that need it (`users/me`, the access enforcement) read it out
+            // without re-verifying the session cookie.
+            req.extensions_mut().insert(claims);
+            next.run(req).await
+        }
         GateDecision::Unavailable => auth_unavailable_response(),
         GateDecision::Unauthorized => auth_required_response(),
         GateDecision::RedirectToLogin => {
@@ -390,8 +546,12 @@ pub async fn auth_gate(req: Request, next: Next) -> Response {
 
 /// What the gate decided to do with a request.
 enum GateDecision {
-    /// Serve the request: a public path, the Disabled test state, or a valid session.
+    /// Serve the request without an identity: a public path, the Disabled test
+    /// state.
     PassThrough,
+    /// Serve the request and carry the verified identity claims in request
+    /// extensions: a valid session.
+    Authenticated(SessionClaims),
     /// Fail closed: the auth state is missing, never serve data.
     Unavailable,
     /// Unauthenticated /api/* request: JSON 401.
@@ -423,15 +583,10 @@ fn gate_decision(
         Some(AuthState::Disabled) => GateDecision::PassThrough,
         Some(AuthState::Oidc(config)) => {
             let jar = session_cookie_jar(config);
-            let session_valid = jar
-                .verify_session(cookie_header.unwrap_or_default())
-                .is_ok();
-            if session_valid {
-                GateDecision::PassThrough
-            } else if path.starts_with("/api/") {
-                GateDecision::Unauthorized
-            } else {
-                GateDecision::RedirectToLogin
+            match jar.verify_session(cookie_header.unwrap_or_default()) {
+                Ok(claims) => GateDecision::Authenticated(claims),
+                Err(_) if path.starts_with("/api/") => GateDecision::Unauthorized,
+                Err(_) => GateDecision::RedirectToLogin,
             }
         }
     }
@@ -524,21 +679,63 @@ pub fn sanitize_return_to(return_to: Option<&str>) -> String {
 /// same signing key derives the jar's key, so the real signature/expiry
 /// verification path is exercised.
 #[doc(hidden)]
-pub fn mint_session_cookie_for_tests(signing_key: Option<&str>, secure: bool) -> String {
+pub fn mint_session_cookie_for_tests(
+    signing_key: Option<&str>,
+    secure: bool,
+    claims: &SessionClaims,
+) -> String {
     SessionCookieJar::new(signing_key, secure)
-        .mint_session(SESSION_MAX_AGE_SECONDS)
+        .mint_session(SESSION_MAX_AGE_SECONDS, claims)
         .encoded()
         .stripped()
         .to_string()
 }
 
+/// Test-only: a fixed identity the auth-gate test binaries mint session
+/// cookies with. The values are arbitrary; only the signature/expiry path is
+/// exercised.
+#[doc(hidden)]
+pub fn session_claims_for_tests() -> SessionClaims {
+    SessionClaims {
+        subject: "test-subject".to_string(),
+        display_name: "Test User".to_string(),
+        email: "test-user@example.com".to_string(),
+        groups: vec!["yafm-test".to_string()],
+    }
+}
+
 // ─── OIDC flow: lazy discovery + the login/callback/logout endpoints ────
 
 /// The configured OIDC client type as openidconnect's typestate resolves it
-/// after `CoreClient::from_provider_metadata` (the auth and token endpoints
+/// after `Client::from_provider_metadata` (the auth and token endpoints
 /// come from discovery) plus `set_redirect_uri`. Named so the process-global
-/// discovery cache can hold the client.
-type DiscoveredClient = CoreClient<
+/// discovery cache can hold the client. Unlike `CoreClient`, the claims type
+/// is `ExtraIdTokenClaims` so the callback can read the `groups` claim.
+/// The client typestate before the endpoint set: the full generic list minus
+/// the endpoint markers. The alias takes the endpoint markers as its leading
+/// parameters, so the discovery call and the test construction spell the
+/// marker list instead of repeating the eleven generics.
+type ClientTypestate<Discovery, Authorization, Token, UserInfo, Jwks, Revocation> = Client<
+    ExtraIdTokenClaims,
+    CoreAuthDisplay,
+    CoreGenderClaim,
+    CoreJweContentEncryptionAlgorithm,
+    CoreJsonWebKey,
+    CoreAuthPrompt,
+    StandardErrorResponse<CoreErrorResponseType>,
+    ExtraTokenResponse,
+    CoreTokenIntrospectionResponse,
+    CoreRevocableToken,
+    CoreRevocationErrorResponse,
+    Discovery,
+    Authorization,
+    Token,
+    UserInfo,
+    Jwks,
+    Revocation,
+>;
+
+type DiscoveredClient = ClientTypestate<
     EndpointSet,
     EndpointNotSet,
     EndpointNotSet,
@@ -646,7 +843,7 @@ async fn discover_provider(config: &AuthOidcConfig) -> Result<DiscoveredProvider
         .await
         .map_err(|error| format!("provider metadata fetch failed: {error}"))?;
     let end_session_url = metadata.additional_metadata().end_session_endpoint.clone();
-    let client = CoreClient::<
+    let client = ClientTypestate::<
         EndpointSet,
         EndpointNotSet,
         EndpointNotSet,
@@ -831,13 +1028,25 @@ async fn callback_response(
     // against a re-discovered JWKS without re-running the single-use code
     // exchange.
     let provider = discovered_provider(config).await?;
-    exchange_code_and_validate_id_token(config, &provider, code, &login).await?;
+    let claims = exchange_code_and_validate_id_token(config, &provider, code, &login).await?;
 
-    // Single-use flow complete: mint the session, clear the login cookie and
-    // redirect to the return-to path (sanitized again — the cookie is signed,
+    // Single-use flow complete: mint the session (carrying the identity
+    // claims), clear the login cookie and redirect to the return-to path
+    // (sanitized again — the cookie is signed,
     // but the redirect target is still only trusted after the same-origin
     // check).
-    let minted = jar.mint_session(SESSION_MAX_AGE_SECONDS);
+    let minted = jar.mint_session(SESSION_MAX_AGE_SECONDS, &claims);
+    // Browsers cap a cookie at ~4 KB and silently drop oversized Set-Cookie
+    // values: a login that looks like a bug. The budget check logs a warning
+    // for operators instead of letting the drop happen unnoticed; the
+    // practical limit is documented in the config example and ADR-0005.
+    if minted.encoded().to_string().len() > SESSION_COOKIE_BUDGET_BYTES {
+        tracing::warn!(
+            "The session cookie for subject {} exceeds the {}-byte cookie budget; the browser may silently drop it. Reduce the user's authentik group memberships or shorten group names.",
+            claims.subject,
+            SESSION_COOKIE_BUDGET_BYTES
+        );
+    }
     let cleared = jar.clear_login();
     Ok(redirect_with_cookies(
         sanitize_return_to(Some(&login.return_to)).as_str(),
@@ -894,7 +1103,7 @@ async fn exchange_code_and_validate_id_token(
     provider: &DiscoveredProvider,
     code: &str,
     login: &LoginCookieData,
-) -> Result<(), AuthFlowError> {
+) -> Result<SessionClaims, AuthFlowError> {
     let token_response = provider
         .client
         .exchange_code(AuthorizationCode::new(code.to_string()))
@@ -912,7 +1121,7 @@ async fn exchange_code_and_validate_id_token(
     let nonce = Nonce::new(login.nonce.clone());
     let verifier = provider.client.id_token_verifier();
     match id_token.claims(&verifier, &nonce) {
-        Ok(_) => Ok(()),
+        Ok(claims) => Ok(session_claims_from_id_token(claims)),
         Err(error) if claims_error_is_retryable(&error) => {
             // The provider rotated its signing key: the cached JWKS (fetched
             // once at discovery) no longer has the token's `kid`. Clear the
@@ -926,10 +1135,57 @@ async fn exchange_code_and_validate_id_token(
             let verifier = provider.client.id_token_verifier();
             id_token
                 .claims(&verifier, &nonce)
-                .map(|_| ())
+                .map(session_claims_from_id_token)
                 .map_err(|_| AuthFlowError::Unauthorized)
         }
         Err(_) => Err(AuthFlowError::Unauthorized),
+    }
+}
+
+/// Captures the authenticated identity from the validated ID-token claims
+/// (ADR-0005): the subject is mandatory, the display name falls back from
+/// `preferred_username` to `name` (the untagged value first, then the first
+/// localized value) and then to `email`, and the groups claim feeds the
+/// access control. `email_verified` is deliberately not read.
+fn session_claims_from_id_token(
+    claims: &IdTokenClaims<ExtraIdTokenClaims, CoreGenderClaim>,
+) -> SessionClaims {
+    let email = claims
+        .email()
+        .map(|value| value.to_string())
+        .unwrap_or_default();
+    // The display chain is `preferred_username` -> `name` -> `email`, then
+    // empty (surfaced as the subject by `users/me`).
+    let display_name = claims
+        .preferred_username()
+        .map(|value| value.to_string())
+        .or_else(|| {
+            claims.name().and_then(|localized| {
+                localized
+                    .get(None)
+                    .or_else(|| localized.iter().next().map(|(_, value)| value))
+                    .map(|value| value.to_string())
+            })
+        })
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            if email.is_empty() {
+                None
+            } else {
+                Some(email.clone())
+            }
+        })
+        .unwrap_or_default();
+    let groups = claims
+        .additional_claims()
+        .groups
+        .clone()
+        .unwrap_or_default();
+    SessionClaims {
+        subject: claims.subject().to_string(),
+        display_name,
+        email,
+        groups,
     }
 }
 
@@ -1094,7 +1350,7 @@ mod tests {
             TokenUrl::new("https://authentik.example.com/application/o/yafm/token/".to_string())
                 .expect("a valid token URL"),
         ));
-        CoreClient::<
+        ClientTypestate::<
             EndpointSet,
             EndpointNotSet,
             EndpointNotSet,
@@ -1170,7 +1426,7 @@ mod tests {
     #[test]
     fn minted_session_cookies_round_trip_their_attributes_and_value() {
         let jar = SessionCookieJar::new(Some(TEST_SIGNING_KEY), false);
-        let minted = jar.mint_session(SESSION_MAX_AGE_SECONDS);
+        let minted = jar.mint_session(SESSION_MAX_AGE_SECONDS, &session_claims_for_tests());
 
         // The Set-Cookie value carries the attributes; Secure is omitted for a
         // plain-HTTP deployment (cookieSecure defaults to false).
@@ -1186,16 +1442,22 @@ mod tests {
         );
 
         // The name=value part a browser echoes back in the Cookie request
-        // header verifies with the same signing key.
+        // header verifies with the same signing key and carries the identity
+        // claims.
         let cookie_header = minted.encoded().stripped().to_string();
-        jar.verify_session(&cookie_header)
+        let verified = jar
+            .verify_session(&cookie_header)
             .expect("a freshly minted session must verify");
+        assert_eq!(verified.subject, "test-subject");
+        assert_eq!(verified.display_name, "Test User");
+        assert_eq!(verified.email, "test-user@example.com");
+        assert_eq!(verified.groups, vec!["yafm-test".to_string()]);
     }
 
     #[test]
     fn a_secure_session_cookie_carries_the_secure_attribute() {
         let jar = SessionCookieJar::new(Some(TEST_SIGNING_KEY), true);
-        let minted = jar.mint_session(3600);
+        let minted = jar.mint_session(3600, &session_claims_for_tests());
 
         let set_cookie = minted.encoded().to_string();
         assert!(set_cookie.contains("Secure"));
@@ -1205,14 +1467,15 @@ mod tests {
     fn session_cookies_signed_with_a_different_signing_key_are_rejected() {
         let jar = SessionCookieJar::new(Some(TEST_SIGNING_KEY), false);
         let forged = SessionCookieJar::new(Some("a-different-signing-key"), false)
-            .mint_session(3600)
+            .mint_session(3600, &session_claims_for_tests())
             .encoded()
             .stripped()
             .to_string();
 
         let error = jar
             .verify_session(&forged)
-            .expect_err("a cookie signed with a different signing key must be rejected");
+            .err() // SessionClaims has no Debug, so expect_err is not available.
+            .expect("a cookie signed with a different signing key must be rejected");
         assert_eq!(error, "The session cookie signature is invalid.");
     }
 
@@ -1224,24 +1487,32 @@ mod tests {
     fn keyless_jars_generate_independent_keys_per_process() {
         let jar_a = SessionCookieJar::new(None, false);
         let jar_b = SessionCookieJar::new(None, false);
-        let signed_by_a = jar_a.mint_session(3600).encoded().stripped().to_string();
+        let signed_by_a = jar_a
+            .mint_session(3600, &session_claims_for_tests())
+            .encoded()
+            .stripped()
+            .to_string();
 
         let error = jar_b
             .verify_session(&signed_by_a)
-            .expect_err("a cookie signed by another keyless jar must be rejected");
+            .err() // SessionClaims has no Debug, so expect_err is not available.
+            .expect("a cookie signed by another keyless jar must be rejected");
         assert_eq!(error, "The session cookie signature is invalid.");
     }
 
     #[test]
     fn tampered_session_cookies_are_rejected() {
         let jar = SessionCookieJar::new(Some(TEST_SIGNING_KEY), false);
-        let minted = jar.mint_session(3600).encoded().stripped().to_string();
+        let minted = jar
+            .mint_session(3600, &session_claims_for_tests())
+            .encoded()
+            .stripped()
+            .to_string();
 
         // Appending a character to the echoed value: the signature no longer
         // covers the tampered value.
         let tampered = format!("{minted}x");
-        jar.verify_session(&tampered)
-            .expect_err("a tampered value must be rejected");
+        assert!(jar.verify_session(&tampered).is_err());
     }
 
     #[test]
@@ -1249,34 +1520,188 @@ mod tests {
         let jar = SessionCookieJar::new(Some(TEST_SIGNING_KEY), false);
         // Max-Age=0 mints a payload that expires in the same second, so the
         // expiry check rejects it without needing a sleep.
-        let expired = jar.mint_session(0).encoded().stripped().to_string();
+        let expired = jar
+            .mint_session(0, &session_claims_for_tests())
+            .encoded()
+            .stripped()
+            .to_string();
 
         let error = jar
             .verify_session(&expired)
-            .expect_err("an expired session must be rejected");
+            .err() // SessionClaims has no Debug, so expect_err is not available.
+            .expect("an expired session must be rejected");
         assert_eq!(error, "The session cookie has expired.");
     }
 
     #[test]
     fn the_session_payload_check_rejects_unrecognizable_values() {
-        let error = check_session_payload("").expect_err("an empty payload must be rejected");
+        let error = parse_session_payload("")
+            .err() // SessionClaims has no Debug, so expect_err is not available.
+            .expect("an empty payload must be rejected");
         assert_eq!(error, "The session cookie is not recognizable.");
 
-        let error = check_session_payload("v2:9999999999")
-            .expect_err("an unknown payload version must be rejected");
+        let error = parse_session_payload("v2:9999999999")
+            .err() // SessionClaims has no Debug, so expect_err is not available.
+            .expect("a truncated payload must be rejected");
         assert_eq!(error, "The session cookie is not recognizable.");
 
-        let error = check_session_payload("v1:not-a-number")
-            .expect_err("a non-numeric expiration must be rejected");
+        let error = parse_session_payload("v1:not-a-number")
+            .err() // SessionClaims has no Debug, so expect_err is not available.
+            .expect("an unknown payload version must be rejected");
         assert_eq!(error, "The session cookie is not recognizable.");
 
-        let error = check_session_payload("v1:0")
-            .expect_err("a zero expiration must be rejected as expired");
+        let error = parse_session_payload("v2:not-a-number:a:b:c:d")
+            .err() // SessionClaims has no Debug, so expect_err is not available.
+            .expect("a non-numeric expiration must be rejected");
+        assert_eq!(error, "The session cookie is not recognizable.");
+
+        let error = parse_session_payload("v2:0:a:b:c:d")
+            .err() // SessionClaims has no Debug, so expect_err is not available.
+            .expect("a zero expiration must be rejected as expired");
         assert_eq!(error, "The session cookie has expired.");
 
-        let far_future = unix_seconds_now() + 3600;
-        check_session_payload(&format!("{SESSION_PAYLOAD_VERSION}:{far_future}"))
-            .expect("a far-future expiration must be accepted");
+        // The subject is mandatory: an empty encoded subject is rejected even
+        // though the other claims may be empty.
+        let error = parse_session_payload("v2:9999999999::display:email:groups")
+            .err() // SessionClaims has no Debug, so expect_err is not available.
+            .expect("an empty subject must be rejected");
+        assert_eq!(error, "The session cookie is not recognizable.");
+
+        // A field containing an invalid percent escape that decodes to
+        // non-UTF-8 bytes rejects the payload.
+        let error = parse_session_payload("v2:9999999999:%FF:display:email:groups")
+            .err() // SessionClaims has no Debug, so expect_err is not available.
+            .expect("a non-UTF-8 subject must be rejected");
+        assert_eq!(error, "The session cookie is not recognizable.");
+    }
+
+    /// The identity fields round-trip exactly through the percent-encoding: a
+    /// display name or email containing the field separator (`:`) or the
+    /// groups separator (`,`) cannot forge a field or group boundary.
+    #[test]
+    fn session_payload_round_trips_claim_values_containing_separators() {
+        let jar = SessionCookieJar::new(Some(TEST_SIGNING_KEY), false);
+        let claims = SessionClaims {
+            subject: "sub:ject".to_string(),
+            display_name: "User, the: second".to_string(),
+            email: "user@example.com".to_string(),
+            groups: vec!["group, one".to_string(), "group:two".to_string()],
+        };
+        let minted = jar
+            .mint_session(3600, &claims)
+            .encoded()
+            .stripped()
+            .to_string();
+
+        let verified = jar
+            .verify_session(&minted)
+            .expect("separator values must round trip");
+        assert_eq!(verified.subject, "sub:ject");
+        assert_eq!(verified.display_name, "User, the: second");
+        assert_eq!(verified.email, "user@example.com");
+        assert_eq!(
+            verified.groups,
+            vec!["group, one".to_string(), "group:two".to_string()]
+        );
+    }
+
+    #[test]
+    fn session_payload_round_trips_empty_display_email_and_groups() {
+        let jar = SessionCookieJar::new(Some(TEST_SIGNING_KEY), false);
+        let claims = SessionClaims {
+            subject: "subject-abc".to_string(),
+            display_name: String::new(),
+            email: String::new(),
+            groups: Vec::new(),
+        };
+        let minted = jar
+            .mint_session(3600, &claims)
+            .encoded()
+            .stripped()
+            .to_string();
+
+        let verified = jar
+            .verify_session(&minted)
+            .expect("empty optional claims must round trip");
+        assert_eq!(verified.subject, "subject-abc");
+        assert_eq!(verified.display_name, "");
+        assert_eq!(verified.email, "");
+        assert!(verified.groups.is_empty());
+    }
+
+    /// The identity capture from validated ID-token claims: the display name
+    /// falls back from preferred_username to name to email, and the groups
+    /// claim flows into the session. Constructing the claims directly (the
+    /// same shape the verifier returns) so the capture is testable without a
+    /// live IdP.
+    #[test]
+    fn the_session_claims_come_from_the_id_token_claims() {
+        let claims = IdTokenClaims::new(
+            IssuerUrl::new(TEST_ISSUER.to_string()).expect("a valid issuer URL"),
+            vec![openidconnect::Audience::new("aud".to_string())],
+            chrono::Utc::now() + chrono::Duration::hours(1),
+            chrono::Utc::now(),
+            {
+                let mut standard = openidconnect::StandardClaims::new(
+                    openidconnect::SubjectIdentifier::new("sub-value-abc".to_string()),
+                );
+                standard = standard.set_preferred_username(Some(
+                    openidconnect::EndUserUsername::new("alice".to_string()),
+                ));
+                standard = standard.set_email(Some(openidconnect::EndUserEmail::new(
+                    "alice@example.com".to_string(),
+                )));
+                standard
+            },
+            ExtraIdTokenClaims {
+                groups: Some(vec!["yafm-devs".to_string(), "yafm-common".to_string()]),
+            },
+        );
+
+        let session = session_claims_from_id_token(&claims);
+        assert_eq!(session.subject, "sub-value-abc");
+        assert_eq!(session.display_name, "alice");
+        assert_eq!(session.email, "alice@example.com");
+        assert_eq!(
+            session.groups,
+            vec!["yafm-devs".to_string(), "yafm-common".to_string()]
+        );
+    }
+
+    /// The display-name fallback chain: no preferred_username falls back to
+    /// `name` (the untagged value first), then to `email`, then to empty.
+    #[test]
+    fn the_display_name_falls_back_to_name_then_email() {
+        let base = |preferred: Option<String>, name: Option<String>| {
+            let mut standard = openidconnect::StandardClaims::new(
+                openidconnect::SubjectIdentifier::new("sub".to_string()),
+            );
+            standard =
+                standard.set_preferred_username(preferred.map(openidconnect::EndUserUsername::new));
+            standard = standard.set_name(name.map(|value| {
+                openidconnect::LocalizedClaim::from(openidconnect::EndUserName::new(value))
+            }));
+            standard = standard.set_email(Some(openidconnect::EndUserEmail::new(
+                "alice@example.com".to_string(),
+            )));
+            IdTokenClaims::new(
+                IssuerUrl::new(TEST_ISSUER.to_string()).expect("a valid issuer URL"),
+                vec![openidconnect::Audience::new("aud".to_string())],
+                chrono::Utc::now() + chrono::Duration::hours(1),
+                chrono::Utc::now(),
+                standard,
+                ExtraIdTokenClaims { groups: None },
+            )
+        };
+
+        let session = session_claims_from_id_token(&base(None, Some("Alice Name".to_string())));
+        assert_eq!(session.display_name, "Alice Name");
+
+        // No preferred_username and no name: the email becomes the display
+        // name.
+        let session = session_claims_from_id_token(&base(None, None));
+        assert_eq!(session.display_name, "alice@example.com");
+        assert_eq!(session.email, "alice@example.com");
     }
 
     #[test]
@@ -1530,12 +1955,12 @@ mod tests {
     }
 
     #[test]
-    fn gate_decision_accepts_a_valid_minted_session() {
+    fn gate_decision_accepts_a_valid_minted_session_and_carries_the_claims() {
         let config = gate_test_oidc_config();
         let jar =
             SessionCookieJar::new(config.session_signing_key.as_deref(), config.cookie_secure);
         let cookie_header = jar
-            .mint_session(SESSION_MAX_AGE_SECONDS)
+            .mint_session(SESSION_MAX_AGE_SECONDS, &session_claims_for_tests())
             .encoded()
             .stripped()
             .to_string();
@@ -1552,10 +1977,23 @@ mod tests {
                 Some(&cookie_header),
             );
             assert!(
-                matches!(decision, GateDecision::PassThrough),
+                matches!(decision, GateDecision::Authenticated(_)),
                 "a valid session must grant access to {path}"
             );
         }
+
+        // The authenticated decision carries the verified identity claims so
+        // the middleware can insert them into request extensions.
+        let decision = gate_decision(
+            Some(&AuthState::Oidc(config)),
+            "/api/v1/directory?p=docs",
+            Some(&cookie_header),
+        );
+        let GateDecision::Authenticated(claims) = decision else {
+            panic!("a valid session must authenticate");
+        };
+        assert_eq!(claims.subject, "test-subject");
+        assert_eq!(claims.groups, vec!["yafm-test".to_string()]);
     }
 
     #[test]

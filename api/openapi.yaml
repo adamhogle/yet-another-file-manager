@@ -96,6 +96,29 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HealthResponse'
+  /api/v1/users/me:
+    get:
+      tags: []
+      operationId: getApiV1UsersMe
+      responses:
+        '200':
+          description: Authenticated user identity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserInfoResponse'
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublicErrorResponse'
+        '503':
+          description: Authentication unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublicErrorResponse'
 components:
   schemas:
     DirectoryEntry:
@@ -155,4 +178,22 @@ components:
         - message
       properties:
         message:
+          type: string
+    UserInfoResponse:
+      type: object
+      description: |-
+        The authenticated user's identity, served by `GET /api/v1/users/me` from
+        the session cookie's claims (ADR-0005). The display name is the session's
+        captured display claim; the subject is the stable identity key.
+      required:
+        - subject
+        - displayName
+      properties:
+        displayName:
+          type: string
+        email:
+          type:
+            - string
+            - 'null'
+        subject:
           type: string
