@@ -180,8 +180,9 @@ pub fn validate_access_config(block: AccessConfigFile) -> Result<AccessConfig, S
     for (group, grant) in block.grants {
         let group_name = group.trim().to_string();
         if group_name.is_empty() {
-            return Err("Configuration access grants group names must be non-empty strings."
-                .to_string());
+            return Err(
+                "Configuration access grants group names must be non-empty strings.".to_string(),
+            );
         }
         let mut entries = Vec::new();
         for entry in grant.allow {
@@ -257,9 +258,7 @@ fn validate_allow_path(raw: &str) -> Result<String, String> {
 /// appears), as are backslashes, NUL and `..` components.
 fn validate_deny_pattern(raw: &str) -> Result<DenyPattern, String> {
     if raw.trim().is_empty() {
-        return Err(
-            "Configuration access deny patterns must be non-empty strings.".to_string(),
-        );
+        return Err("Configuration access deny patterns must be non-empty strings.".to_string());
     }
     if raw.contains('\0') || raw.contains('\\') {
         return Err(format!(
@@ -508,7 +507,8 @@ pub fn evaluate(access: &AccessConfig, groups: &[String], segments: &[&str]) -> 
                     pattern: pattern.raw.clone(),
                     source: format!(
                         "allow-specific deny under \"/{path}\" (grant {group})",
-                        path = entry.path, group = group
+                        path = entry.path,
+                        group = group
                     ),
                 }),
                 allow_source: None,
@@ -523,7 +523,11 @@ pub fn evaluate(access: &AccessConfig, groups: &[String], segments: &[&str]) -> 
         "global allow".to_string()
     } else {
         let (group, entry) = covering[0];
-        format!("allow \"/{path}\" (grant {group})", path = entry.path, group = group)
+        format!(
+            "allow \"/{path}\" (grant {group})",
+            path = entry.path,
+            group = group
+        )
     };
     AccessDecision {
         visible: true,
@@ -610,11 +614,12 @@ pub async fn run_access_check(
             .map_err(|_| format!("The shared directory \"{}\" could not be read; the access check needs the real structure.", directory.display()))?;
         let mut blocked: Vec<(String, String)> = Vec::new();
         let mut subdirs: Vec<String> = Vec::new();
-        while let Some(item) = reader
-            .next_entry()
-            .await
-            .map_err(|_| format!("The shared directory \"{}\" could not be read.", directory.display()))?
-        {
+        while let Some(item) = reader.next_entry().await.map_err(|_| {
+            format!(
+                "The shared directory \"{}\" could not be read.",
+                directory.display()
+            )
+        })? {
             let raw_name = item.file_name();
             let name = if let Some(name) = raw_name.to_str() {
                 name.to_string()
@@ -743,8 +748,16 @@ mod tests {
         // it by the allow-specific deny.
         assert!(visible(&config, &["yafm-tv"], "tv-shows"));
         assert!(visible(&config, &["yafm-tv"], "tv-shows/season-1"));
-        assert!(!visible(&config, &["yafm-tv"], "tv-shows/season-1/show.s01e01.nfo"));
-        assert!(visible(&config, &["yafm-tv"], "tv-shows/season-1/show.s01e01.mkv"));
+        assert!(!visible(
+            &config,
+            &["yafm-tv"],
+            "tv-shows/season-1/show.s01e01.nfo"
+        ));
+        assert!(visible(
+            &config,
+            &["yafm-tv"],
+            "tv-shows/season-1/show.s01e01.mkv"
+        ));
 
         // The devs grant: two allow entries, with tmp/** denied under /dev.
         assert!(visible(&config, &["yafm-devs"], "projects"));
@@ -889,34 +902,23 @@ mod tests {
 
     #[test]
     fn validation_refuses_invalid_allow_paths_and_deny_patterns() {
-        let error = validate_allow_path("../escape")
-            .expect_err(
-            "`..` must be refused");
+        let error = validate_allow_path("../escape").expect_err("`..` must be refused");
         assert!(error.contains("`..` components are not allowed"));
 
-        let error = validate_allow_path("with\\backslash")
-            .expect_err(
-            "a backslash must be refused");
+        let error =
+            validate_allow_path("with\\backslash").expect_err("a backslash must be refused");
         assert!(error.contains("backslash"));
 
-        let error = validate_allow_path("/foo//bar")
-            .expect_err(
-            "empty segments must be refused");
+        let error = validate_allow_path("/foo//bar").expect_err("empty segments must be refused");
         assert!(error.contains("segments must not be empty"));
 
-        let error = validate_deny_pattern("tmp/")
-            .expect_err(
-            "a trailing slash must be refused");
+        let error = validate_deny_pattern("tmp/").expect_err("a trailing slash must be refused");
         assert!(error.contains("trailing slash is not supported"));
 
-        let error = validate_deny_pattern("")
-            .expect_err(
-            "an empty pattern must be refused");
+        let error = validate_deny_pattern("").expect_err("an empty pattern must be refused");
         assert!(error.contains("non-empty"));
 
-        let error = validate_deny_pattern("a/../b")
-            .expect_err(
-            "`..` segments must be refused");
+        let error = validate_deny_pattern("a/../b").expect_err("`..` segments must be refused");
         assert!(error.contains("`..`"));
     }
 
@@ -937,22 +939,16 @@ mod tests {
             deny: Vec::new(),
             grants: BTreeMap::new(),
         };
-        let error = validate_access_config(block)
-            .expect_err(
-            "duplicate allow entries must be refused");
+        let error =
+            validate_access_config(block).expect_err("duplicate allow entries must be refused");
         assert!(error.contains("more than once"));
 
         let block = AccessConfigFile {
             allow: Vec::new(),
             deny: Vec::new(),
-            grants: BTreeMap::from([(
-                "yafm-tv".to_string(),
-                GrantFile { allow: Vec::new() },
-            )]),
+            grants: BTreeMap::from([("yafm-tv".to_string(), GrantFile { allow: Vec::new() })]),
         };
-        let error = validate_access_config(block)
-            .expect_err(
-            "an empty grant must be refused");
+        let error = validate_access_config(block).expect_err("an empty grant must be refused");
         assert!(error.contains("at least one allow entry"));
     }
 
@@ -983,7 +979,10 @@ mod tests {
 
         assert!(report.contains("groups: yafm-tv"), "{report}");
         // /common visible via the global allow.
-        assert!(report.contains("/common  visible (global allow)"), "{report}");
+        assert!(
+            report.contains("/common  visible (global allow)"),
+            "{report}"
+        );
         // /tv-shows visible via the grant; the .nfo file is blocked
         // individually, the .mkv is not.
         assert!(
@@ -1062,10 +1061,17 @@ mod tests {
         let line = verdict_line("dev", &decision);
         assert!(line.contains("hidden: no allow entry matches"), "{line}");
 
-        let decision = evaluate(&config, &["yafm-tv".to_string()], &path_segments("tv-shows/x.nfo"));
+        let decision = evaluate(
+            &config,
+            &["yafm-tv".to_string()],
+            &path_segments("tv-shows/x.nfo"),
+        );
         let line = verdict_line("tv-shows/x.nfo", &decision);
         assert!(line.contains("denied by \"*.nfo\""), "{line}");
-        assert!(line.contains("allow-specific deny under \"/tv-shows\""), "{line}");
+        assert!(
+            line.contains("allow-specific deny under \"/tv-shows\""),
+            "{line}"
+        );
 
         let decision = evaluate(&config, &Vec::<String>::new(), &path_segments("dev/.env"));
         let line = verdict_line("dev/.env", &decision);

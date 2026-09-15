@@ -35,12 +35,17 @@
 //! This is a development and verification tool: it is doc-hidden, linked into
 //! every build but never called by the server, and has no place in the runtime
 //! image.
-use backend::auth::{mint_session_cookie_for_tests, SessionClaims};
+use backend::auth::{SessionClaims, mint_session_cookie_for_tests};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let signing_key = args.get(1).expect("usage: mint-cookie <signing-key> <subject> <groups>");
-    let subject = args.get(2).cloned().unwrap_or_else(|| "test-subject".to_string());
+    let signing_key = args
+        .get(1)
+        .expect("usage: mint-cookie <signing-key> <subject> <groups>");
+    let subject = args
+        .get(2)
+        .cloned()
+        .unwrap_or_else(|| "test-subject".to_string());
     let groups = args.get(3).cloned().unwrap_or_default();
     let claims = SessionClaims {
         subject: subject.clone(),

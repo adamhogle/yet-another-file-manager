@@ -299,10 +299,17 @@ async fn path_variant_public_paths_are_gated_through_the_router() {
 #[tokio::test]
 async fn forged_and_garbage_session_cookies_are_rejected() {
     let app = oidc_router().await;
-    let minted = backend::auth::mint_session_cookie_for_tests(Some(TEST_SIGNING_KEY), false, &backend::auth::session_claims_for_tests());
+    let minted = backend::auth::mint_session_cookie_for_tests(
+        Some(TEST_SIGNING_KEY),
+        false,
+        &backend::auth::session_claims_for_tests(),
+    );
     let tampered = format!("{minted}x");
-    let forged_with_other_key =
-        backend::auth::mint_session_cookie_for_tests(Some("a-different-signing-key"), false, &backend::auth::session_claims_for_tests());
+    let forged_with_other_key = backend::auth::mint_session_cookie_for_tests(
+        Some("a-different-signing-key"),
+        false,
+        &backend::auth::session_claims_for_tests(),
+    );
 
     let cookie_cases: Vec<(&str, String)> = vec![
         ("/api/v1/health", "yafm_session=zzz".to_string()),
@@ -336,7 +343,11 @@ async fn forged_and_garbage_session_cookies_are_rejected() {
 /// backend tests).
 #[tokio::test]
 async fn valid_session_grants_access_to_every_endpoint() {
-    let cookie_header = backend::auth::mint_session_cookie_for_tests(Some(TEST_SIGNING_KEY), false, &backend::auth::session_claims_for_tests());
+    let cookie_header = backend::auth::mint_session_cookie_for_tests(
+        Some(TEST_SIGNING_KEY),
+        false,
+        &backend::auth::session_claims_for_tests(),
+    );
     let app = oidc_router().await;
 
     let response = get(&app, "/api/v1/health", Some(&cookie_header)).await;

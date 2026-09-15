@@ -86,7 +86,11 @@ fn minted_cookie(groups: &[&str]) -> String {
         .to_string()
 }
 
-async fn get(app: &axum::Router, path: &str, cookie_header: Option<&str>) -> axum::http::Response<Body> {
+async fn get(
+    app: &axum::Router,
+    path: &str,
+    cookie_header: Option<&str>,
+) -> axum::http::Response<Body> {
     let mut builder = Request::builder().method("GET").uri(path);
     if let Some(value) = cookie_header {
         builder = builder.header("Cookie", value);

@@ -124,7 +124,12 @@ async fn run() -> Result<(), String> {
     let cwd =
         env::current_dir().map_err(|_| "Could not determine current directory".to_string())?;
     let options = resolve_startup_options(env::args().skip(1), &cwd)?;
-    backend::initialize_app_config(options.config_path.as_ref().expect("a resolved config path"))?;
+    backend::initialize_app_config(
+        options
+            .config_path
+            .as_ref()
+            .expect("a resolved config path"),
+    )?;
 
     // In release builds the test-only env var is ignored; warn so a stray flag
     // is visible instead of silently dropped.
@@ -163,7 +168,8 @@ async fn run() -> Result<(), String> {
             .ok_or_else(|| "Application configuration was not initialized".to_string())?;
         let access = backend::access::get_access_config()
             .ok_or_else(|| "Configuration access is required for the access check.".to_string())?;
-        let report = backend::access::run_access_check(shared_root, access, &options.groups).await?;
+        let report =
+            backend::access::run_access_check(shared_root, access, &options.groups).await?;
         print!("{report}");
         return Ok(());
     }
@@ -264,7 +270,12 @@ mod tests {
         fs::write(&config_path, "sharedRoot: /tmp\n").expect("write config");
 
         let options = resolve_startup_options(
-            ["--check-access".to_string(), "--groups".to_string(), "yafm-tv".to_string()].into_iter(),
+            [
+                "--check-access".to_string(),
+                "--groups".to_string(),
+                "yafm-tv".to_string(),
+            ]
+            .into_iter(),
             cwd.path(),
         )
         .expect("resolve options");

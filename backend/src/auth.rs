@@ -13,10 +13,9 @@ use cookie::time::Duration;
 use cookie::{Cookie, CookieJar, Key, SameSite};
 use once_cell::sync::OnceCell;
 use openidconnect::core::{
-    CoreAuthDisplay, CoreAuthPrompt, CoreErrorResponseType, CoreGenderClaim,
-    CoreJwsSigningAlgorithm, CoreJweContentEncryptionAlgorithm, CoreJsonWebKey,
+    CoreAuthDisplay, CoreAuthPrompt, CoreAuthenticationFlow, CoreErrorResponseType,
+    CoreGenderClaim, CoreJsonWebKey, CoreJweContentEncryptionAlgorithm, CoreJwsSigningAlgorithm,
     CoreRevocableToken, CoreRevocationErrorResponse, CoreTokenIntrospectionResponse, CoreTokenType,
-    CoreAuthenticationFlow,
 };
 use openidconnect::{
     AdditionalClaims, AuthorizationCode, ClaimsVerificationError, Client, ClientId, ClientSecret,
@@ -1042,7 +1041,8 @@ async fn callback_response(
     if minted.encoded().to_string().len() > SESSION_COOKIE_BUDGET_BYTES {
         tracing::warn!(
             "The session cookie for subject {} exceeds the {}-byte cookie budget; the browser may silently drop it. Reduce the user's authentik group memberships or shorten group names.",
-            claims.subject, SESSION_COOKIE_BUDGET_BYTES
+            claims.subject,
+            SESSION_COOKIE_BUDGET_BYTES
         );
     }
     let cleared = jar.clear_login();
@@ -1160,7 +1160,10 @@ fn session_claims_from_id_token(
             })
         })
         .unwrap_or_default();
-    let email = claims.email().map(|value| value.to_string()).unwrap_or_default();
+    let email = claims
+        .email()
+        .map(|value| value.to_string())
+        .unwrap_or_default();
     let groups = claims
         .additional_claims()
         .groups
@@ -1595,7 +1598,10 @@ mod tests {
         assert_eq!(verified.subject, "sub:ject");
         assert_eq!(verified.display_name, "User, the: second");
         assert_eq!(verified.email, "user@example.com");
-        assert_eq!(verified.groups, vec!["group, one".to_string(), "group:two".to_string()]);
+        assert_eq!(
+            verified.groups,
+            vec!["group, one".to_string(), "group:two".to_string()]
+        );
     }
 
     #[test]
@@ -1635,13 +1641,12 @@ mod tests {
             chrono::Utc::now() + chrono::Duration::hours(1),
             chrono::Utc::now(),
             {
-                let mut standard =
-                    openidconnect::StandardClaims::new(openidconnect::SubjectIdentifier::new(
-                        "sub-value-abc".to_string(),
-                    ));
-                standard = standard.set_preferred_username(Some(openidconnect::EndUserUsername::new(
-                    "alice".to_string(),
-                )));
+                let mut standard = openidconnect::StandardClaims::new(
+                    openidconnect::SubjectIdentifier::new("sub-value-abc".to_string()),
+                );
+                standard = standard.set_preferred_username(Some(
+                    openidconnect::EndUserUsername::new("alice".to_string()),
+                ));
                 standard = standard.set_email(Some(openidconnect::EndUserEmail::new(
                     "alice@example.com".to_string(),
                 )));
@@ -1667,10 +1672,9 @@ mod tests {
     #[test]
     fn the_display_name_falls_back_to_name_then_empty() {
         let base = |preferred: Option<String>, name: Option<String>| {
-            let mut standard =
-                openidconnect::StandardClaims::new(openidconnect::SubjectIdentifier::new(
-                    "sub".to_string(),
-                ));
+            let mut standard = openidconnect::StandardClaims::new(
+                openidconnect::SubjectIdentifier::new("sub".to_string()),
+            );
             standard =
                 standard.set_preferred_username(preferred.map(openidconnect::EndUserUsername::new));
             standard = standard.set_name(name.map(|value| {

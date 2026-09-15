@@ -1356,9 +1356,9 @@ mod tests {
 
     use super::{
         ByteRange, OIDC_SESSION_KEY_TOO_SHORT_ERROR, OidcConfigFile, RangeDecision,
-        compute_weak_etag, content_disposition_value, content_response_headers,
-        ensure_within_root, etag_matches_weakly, if_none_match_matches, load_app_config,
-        modified_to_iso, open_download_target, parse_config_file, parse_single_byte_range,
+        compute_weak_etag, content_disposition_value, content_response_headers, ensure_within_root,
+        etag_matches_weakly, if_none_match_matches, load_app_config, modified_to_iso,
+        open_download_target, parse_config_file, parse_single_byte_range,
         percent_decode_relative_path, percent_encode_entry_name, percent_encode_ext_value,
         users_me_response, validate_relative_path,
     };
