@@ -957,14 +957,10 @@ async fn health() -> Json<HealthResponse> {
 )]
 async fn directory(
     Query(query): Query<PathQuery>,
-    identity: Option<Extension<SessionClaims>>,
+    access_context: Option<Extension<access::AccessContext>>,
 ) -> Result<Response, ApiError> {
     let config = get_app_config()?;
     let relative = validate_relative_path(&query.p)?;
-    // The access groups of the authenticated session (None under the
-    // test-only Disabled auth state, where no access filtering applies and
-    // the pre-access behavior is preserved).
-    let access_groups = identity.map(|extension| extension.0.groups);
 
     let canonical = canonical_entry_target(
         &config.shared_root,
@@ -996,19 +992,18 @@ async fn directory(
         }
 
         // The access filter (ADR-0005): a child entry is visible only when
-        // its path is inside the visible root. The same pure function the
-        // access gate middleware evaluates for the request path decides the
-        // child, so the listing and the download paths cannot drift. The
-        // evaluated name is the API-rendered name (the names the config and
-        // the URLs address).
-        if let (Some(access), Some(groups)) = (access::get_access_config(), access_groups.as_ref())
-        {
+        // its path is inside the visible root. The context the gate stored
+        // carries the groups and the config, so the handler never consults
+        // the global config independently and the listing and the download
+        // paths cannot drift. The evaluated name is the API-rendered name
+        // (the names the config and the URLs address).
+        if let Some(context) = access_context.as_ref() {
             let child = if relative.is_empty() {
                 name.clone()
             } else {
                 format!("{relative}/{name}")
             };
-            if !access::is_path_visible(access, groups, &child) {
+            if !access::is_path_visible(context.access(), &context.groups, &child) {
                 continue;
             }
         }
@@ -1209,14 +1204,15 @@ const DOWNLOAD_PATH: &str = "/api/v1/download";
 
 /// The access gate: evaluates the access decision for the request path once,
 /// after the auth gate verified the session (the chain is access_gate inside
-/// auth_gate, so the identity extension is already present). Only the two
-/// data endpoints are evaluated; every other path has no filesystem
-/// semantics. A hidden request path answers 404 with the same message the
-/// handler's own not-found uses, so hidden and nonexistent are
+/// auth_gate, so the identity extension is already present), and stores the
+/// access context in request extensions for the handlers (ADR-0005 decision
+/// 7). Only the two data endpoints are evaluated; every other path has no
+/// filesystem semantics. A hidden request path answers 404 with the same
+/// message the handler's own not-found uses, so hidden and nonexistent are
 /// indistinguishable and no existence leaks. The test-only Disabled auth
 /// state reaches this middleware without an identity extension: no
 /// enforcement applies and the pre-access behavior is preserved.
-async fn access_gate(req: Request, next: Next) -> Response {
+async fn access_gate(mut req: Request, next: Next) -> Response {
     let path = req.uri().path().to_string();
     if path != DIRECTORY_PATH && path != DOWNLOAD_PATH {
         return next.run(req).await;
@@ -1254,6 +1250,10 @@ async fn access_gate(req: Request, next: Next) -> Response {
         )
             .into_response();
     }
+    // The handlers read the access context from here instead of consulting
+    // the global config independently, so the evaluation cannot drift.
+    req.extensions_mut()
+        .insert(access::AccessContext::new(access, claims.groups));
     next.run(req).await
 }
 

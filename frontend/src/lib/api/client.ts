@@ -89,3 +89,6 @@ export async function fetchDirectory(
 }
 
 export type { DirectoryEntry, DirectoryListing, UserInfoResponse } from './generated/client';
+// The error class the generated client throws; re-exported so views can
+// instanceof-check the status instead of hand-rolling the error shape.
+export { ApiHttpError } from './generated/client';

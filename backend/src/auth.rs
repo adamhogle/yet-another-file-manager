@@ -711,7 +711,11 @@ pub fn session_claims_for_tests() -> SessionClaims {
 /// come from discovery) plus `set_redirect_uri`. Named so the process-global
 /// discovery cache can hold the client. Unlike `CoreClient`, the claims type
 /// is `ExtraIdTokenClaims` so the callback can read the `groups` claim.
-type DiscoveredClient = Client<
+/// The client typestate before the endpoint set: the full generic list minus
+/// the endpoint markers. The alias takes the endpoint markers as its leading
+/// parameters, so the discovery call and the test construction spell the
+/// marker list instead of repeating the eleven generics.
+type ClientTypestate<Discovery, Authorization, Token, UserInfo, Jwks, Revocation> = Client<
     ExtraIdTokenClaims,
     CoreAuthDisplay,
     CoreGenderClaim,
@@ -723,6 +727,15 @@ type DiscoveredClient = Client<
     CoreTokenIntrospectionResponse,
     CoreRevocableToken,
     CoreRevocationErrorResponse,
+    Discovery,
+    Authorization,
+    Token,
+    UserInfo,
+    Jwks,
+    Revocation,
+>;
+
+type DiscoveredClient = ClientTypestate<
     EndpointSet,
     EndpointNotSet,
     EndpointNotSet,
@@ -830,18 +843,7 @@ async fn discover_provider(config: &AuthOidcConfig) -> Result<DiscoveredProvider
         .await
         .map_err(|error| format!("provider metadata fetch failed: {error}"))?;
     let end_session_url = metadata.additional_metadata().end_session_endpoint.clone();
-    let client = Client::<
-        ExtraIdTokenClaims,
-        CoreAuthDisplay,
-        CoreGenderClaim,
-        CoreJweContentEncryptionAlgorithm,
-        CoreJsonWebKey,
-        CoreAuthPrompt,
-        StandardErrorResponse<CoreErrorResponseType>,
-        ExtraTokenResponse,
-        CoreTokenIntrospectionResponse,
-        CoreRevocableToken,
-        CoreRevocationErrorResponse,
+    let client = ClientTypestate::<
         EndpointSet,
         EndpointNotSet,
         EndpointNotSet,
@@ -1348,18 +1350,7 @@ mod tests {
             TokenUrl::new("https://authentik.example.com/application/o/yafm/token/".to_string())
                 .expect("a valid token URL"),
         ));
-        Client::<
-            ExtraIdTokenClaims,
-            CoreAuthDisplay,
-            CoreGenderClaim,
-            CoreJweContentEncryptionAlgorithm,
-            CoreJsonWebKey,
-            CoreAuthPrompt,
-            StandardErrorResponse<CoreErrorResponseType>,
-            ExtraTokenResponse,
-            CoreTokenIntrospectionResponse,
-            CoreRevocableToken,
-            CoreRevocationErrorResponse,
+        ClientTypestate::<
             EndpointSet,
             EndpointNotSet,
             EndpointNotSet,

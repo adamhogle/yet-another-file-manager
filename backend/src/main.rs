@@ -34,7 +34,7 @@ fn resolve_config_path(args: impl Iterator<Item = String>, cwd: &Path) -> Result
 struct StartupOptions {
     check_access: bool,
     groups: Vec<String>,
-    config_path: Option<PathBuf>,
+    config_path: PathBuf,
 }
 
 /// Parses the CLI flags and resolves the config path. `--groups` requires
@@ -95,7 +95,7 @@ fn resolve_startup_options(
     Ok(StartupOptions {
         check_access,
         groups,
-        config_path: Some(config_path),
+        config_path,
     })
 }
 
@@ -124,12 +124,7 @@ async fn run() -> Result<(), String> {
     let cwd =
         env::current_dir().map_err(|_| "Could not determine current directory".to_string())?;
     let options = resolve_startup_options(env::args().skip(1), &cwd)?;
-    backend::initialize_app_config(
-        options
-            .config_path
-            .as_ref()
-            .expect("a resolved config path"),
-    )?;
+    backend::initialize_app_config(&options.config_path)?;
 
     // In release builds the test-only env var is ignored; warn so a stray flag
     // is visible instead of silently dropped.
@@ -260,7 +255,7 @@ mod tests {
             options.groups,
             vec!["yafm-tv".to_string(), "yafm-devs".to_string()]
         );
-        assert_eq!(options.config_path, Some(config_path));
+        assert_eq!(options.config_path, config_path);
     }
 
     #[test]
@@ -281,7 +276,7 @@ mod tests {
         .expect("resolve options");
 
         assert!(options.check_access);
-        assert_eq!(options.config_path, Some(config_path));
+        assert_eq!(options.config_path, config_path);
     }
 
     #[test]

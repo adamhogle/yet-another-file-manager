@@ -109,14 +109,18 @@ struct SegmentMatcher {
 /// What the evaluation decided, with the reason the `--check-access` report
 /// prints. The runtime enforcement reads only `visible`.
 #[derive(Debug, Clone)]
-pub struct AccessDecision {
-    pub visible: bool,
-    /// Why the path is hidden: no allow entry matches, or a deny pattern
-    /// matched.
-    pub denial: Option<AccessDenial>,
-    /// Which allow made the path visible, for the report: `"global allow"` or
+/// The access decision for a path: visible with the allow that made it so,
+/// or hidden with the reason. The variants make the invariant structural:
+/// a visible decision always names its allow source and a hidden one always
+/// carries its denial.
+pub enum AccessDecision {
+    /// The path is inside the visible root. The allow source names which
+    /// allow made it visible, for the report: `"global allow"` or
     /// `allow "/path" (grant <group>)`.
-    pub allow_source: Option<String>,
+    Visible { allow_source: String },
+    /// The path is outside the visible root: no allow entry matches, or a
+    /// deny pattern matched.
+    Hidden(AccessDenial),
 }
 
 /// Why a path is hidden for a user.
@@ -140,6 +144,31 @@ pub fn initialize_access() -> Result<(), String> {
             .to_string()
     })?;
     Ok(())
+}
+
+/// The access context the gate middleware evaluates once per request and
+/// stores in request extensions (ADR-0005 decision 7): the scenario's groups
+/// and the access config the handlers filter entries with. Handlers read this
+/// context instead of consulting the global config independently, so the
+/// access evaluation cannot drift between the endpoints.
+#[derive(Clone)]
+pub struct AccessContext {
+    pub groups: Vec<String>,
+    access: &'static AccessConfig,
+}
+
+impl AccessContext {
+    /// Builds the context from the gate's verified identity and the
+    /// initialized access config.
+    pub fn new(access: &'static AccessConfig, groups: Vec<String>) -> Self {
+        Self { groups, access }
+    }
+
+    /// The access config backing this context; the field is private so
+    /// handlers cannot swap the config the gate evaluated with.
+    pub fn access(&self) -> &'static AccessConfig {
+        self.access
+    }
 }
 
 /// Read access to the initialized access config for the access gate
@@ -230,7 +259,7 @@ fn validate_allow_path(raw: &str) -> Result<String, String> {
             "Configuration access path \"{raw}\" is invalid; backslashes and NUL are not allowed."
         ));
     }
-    let normalized = normalize_relative_path(raw)?;
+    let normalized = normalize_relative_path(raw);
     if normalized.is_empty() {
         // The root itself: `/` or `.` addresses the shared root, and a root
         // allow covers everything under it.
@@ -270,7 +299,7 @@ fn validate_deny_pattern(raw: &str) -> Result<DenyPattern, String> {
             "Configuration access deny pattern \"{raw}\" is invalid; a trailing slash is not supported. Deny the directory by name instead."
         ));
     }
-    let normalized = normalize_relative_path(raw)?;
+    let normalized = normalize_relative_path(raw);
     let segments: Vec<&str> = normalized.split('/').collect();
     for segment in &segments {
         if segment.is_empty() {
@@ -304,13 +333,13 @@ fn validate_deny_pattern(raw: &str) -> Result<DenyPattern, String> {
 /// to a normalized relative path (the config paths are relative to the shared
 /// root, so `/common` and `common` are the same allow). Trailing slashes are
 /// refused by the callers, so they never reach this normalization.
-fn normalize_relative_path(raw: &str) -> Result<String, String> {
+fn normalize_relative_path(raw: &str) -> String {
     let trimmed = raw.trim();
     let without_leading_slash = trimmed.strip_prefix('/').unwrap_or(trimmed);
     let without_leading_dot_slash = without_leading_slash
         .strip_prefix("./")
         .unwrap_or(without_leading_slash);
-    Ok(without_leading_dot_slash.to_string())
+    without_leading_dot_slash.to_string()
 }
 
 /// Whether one segment text matches one path segment: `*` matches anything
@@ -351,6 +380,19 @@ fn glob_match_chars(pattern: &[u8], segment: &[u8]) -> bool {
                 None => return false,
             };
             head == byte && glob_match_chars(rest, tail)
+        }
+    }
+}
+
+impl AccessDenial {
+    /// The report wording for this denial, shared by the verdict lines and
+    /// the check report so the wording cannot drift.
+    fn reason(&self) -> String {
+        match self {
+            AccessDenial::NoAllow => "no allow entry matches".to_string(),
+            AccessDenial::Denied { pattern, source } => {
+                format!("denied by \"{pattern}\" ({source})")
+            }
         }
     }
 }
@@ -442,15 +484,12 @@ pub fn evaluate(access: &AccessConfig, groups: &[String], segments: &[&str]) -> 
                 .grants
                 .iter()
                 .any(|(group, entries)| groups.contains(group) && !entries.is_empty());
-        return AccessDecision {
-            visible: has_allow,
-            denial: if has_allow {
-                None
-            } else {
-                Some(AccessDenial::NoAllow)
-            },
-            allow_source: has_allow
-                .then(|| "allow entries exist for the scenario's groups".to_string()),
+        return if has_allow {
+            AccessDecision::Visible {
+                allow_source: "allow entries exist for the scenario's groups".to_string(),
+            }
+        } else {
+            AccessDecision::Hidden(AccessDenial::NoAllow)
         };
     }
 
@@ -477,23 +516,15 @@ pub fn evaluate(access: &AccessConfig, groups: &[String], segments: &[&str]) -> 
     }
 
     if !covered_by_global && covering.is_empty() {
-        return AccessDecision {
-            visible: false,
-            denial: Some(AccessDenial::NoAllow),
-            allow_source: None,
-        };
+        return AccessDecision::Hidden(AccessDenial::NoAllow);
     }
 
     // The global deny applies to every user and every allow path.
     if let Some(pattern) = access.global_deny.iter().find(|p| p.matches(segments)) {
-        return AccessDecision {
-            visible: false,
-            denial: Some(AccessDenial::Denied {
-                pattern: pattern.raw.clone(),
-                source: "global deny".to_string(),
-            }),
-            allow_source: None,
-        };
+        return AccessDecision::Hidden(AccessDenial::Denied {
+            pattern: pattern.raw.clone(),
+            source: "global deny".to_string(),
+        });
     }
 
     // Every allow-specific deny whose allow covers the path filters the
@@ -501,18 +532,14 @@ pub fn evaluate(access: &AccessConfig, groups: &[String], segments: &[&str]) -> 
     // which covering allow made the path visible.
     for (group, entry) in &covering {
         if let Some(pattern) = entry.deny.iter().find(|p| p.matches(segments)) {
-            return AccessDecision {
-                visible: false,
-                denial: Some(AccessDenial::Denied {
-                    pattern: pattern.raw.clone(),
-                    source: format!(
-                        "allow-specific deny under \"/{path}\" (grant {group})",
-                        path = entry.path,
-                        group = group
-                    ),
-                }),
-                allow_source: None,
-            };
+            return AccessDecision::Hidden(AccessDenial::Denied {
+                pattern: pattern.raw.clone(),
+                source: format!(
+                    "allow-specific deny under \"/{path}\" (grant {group})",
+                    path = entry.path,
+                    group = group
+                ),
+            });
         }
     }
 
@@ -529,11 +556,7 @@ pub fn evaluate(access: &AccessConfig, groups: &[String], segments: &[&str]) -> 
             group = group
         )
     };
-    AccessDecision {
-        visible: true,
-        denial: None,
-        allow_source: Some(allow_source),
-    }
+    AccessDecision::Visible { allow_source }
 }
 
 /// The normalized relative path segments of a validated relative path.
@@ -584,15 +607,21 @@ fn decode_equivalent(relative: &str) -> Option<String> {
 /// the handlers reject the decoded form anyway, so the literal evaluation
 /// decides.
 pub fn is_path_visible(access: &AccessConfig, groups: &[String], relative: &str) -> bool {
-    if !evaluate(access, groups, &path_segments(relative)).visible {
+    if is_hidden(access, groups, relative) {
         return false;
     }
     match decode_equivalent(relative) {
-        Some(decoded) if decoded != relative => {
-            evaluate(access, groups, &path_segments(&decoded)).visible
-        }
+        Some(decoded) if decoded != relative => !is_hidden(access, groups, &decoded),
         _ => true,
     }
+}
+
+/// The hidden verdict for one relative path.
+fn is_hidden(access: &AccessConfig, groups: &[String], relative: &str) -> bool {
+    matches!(
+        evaluate(access, groups, &path_segments(relative)),
+        AccessDecision::Hidden(_)
+    )
 }
 
 /// One line of the `--check-access` report for a directory: the verdict for
@@ -603,20 +632,13 @@ fn verdict_line(relative: &str, decision: &AccessDecision) -> String {
     } else {
         format!("/{relative}")
     };
-    if decision.visible {
-        format!(
-            "{path_display}  visible ({source})",
-            source = decision.allow_source.as_deref().unwrap_or("global allow")
-        )
-    } else {
-        let reason = match &decision.denial {
-            Some(AccessDenial::NoAllow) => "no allow entry matches".to_string(),
-            Some(AccessDenial::Denied { pattern, source }) => {
-                format!("denied by \"{pattern}\" ({source})")
-            }
-            None => "hidden".to_string(),
-        };
-        format!("{path_display}  hidden: {reason}")
+    match decision {
+        AccessDecision::Visible { allow_source } => {
+            format!("{path_display}  visible ({allow_source})")
+        }
+        AccessDecision::Hidden(denial) => {
+            format!("{path_display}  hidden: {}", denial.reason())
+        }
     }
 }
 
@@ -629,6 +651,9 @@ fn verdict_line(relative: &str, decision: &AccessDecision) -> String {
 /// are listed: a blocked folder is marked with everything underneath blocked,
 /// a blocked file individually, so mismatches between the rules and the
 /// actual structure are easy to see and sensitive files are verifiable.
+/// Rules that match nothing (an allow naming a path the walk never evaluates,
+/// or a deny pattern no evaluated path hits) are reported plainly at the end
+/// (ADR-0005 decision 9), so a stale rule cannot hide behind silence.
 pub async fn run_access_check(
     shared_root: &Path,
     access: &AccessConfig,
@@ -640,14 +665,30 @@ pub async fn run_access_check(
     report.push_str(&format!("shared root: {}\n", shared_root.display()));
     report.push('\n');
 
+    let mut rules = check_rules(access);
     let mut queue: Vec<String> = vec![String::new()];
     while let Some(relative) = queue.pop() {
         let segments = path_segments(&relative);
         let decision = evaluate(access, groups, &segments);
+        // Rule usage is tracked against every evaluated path: an allow rule
+        // is used when its coverage covers one, a deny rule when its pattern
+        // matches one.
+        for rule in rules.iter_mut() {
+            if let Some(allow_path) = &rule.allow_path {
+                if allow_covers(allow_path, &segments) {
+                    rule.used = true;
+                }
+            }
+            if let Some(pattern) = &rule.deny {
+                if pattern.matches(&segments) {
+                    rule.used = true;
+                }
+            }
+        }
         report.push_str(&verdict_line(&relative, &decision));
         report.push('\n');
 
-        if !decision.visible {
+        if matches!(decision, AccessDecision::Hidden(_)) {
             // Everything underneath is blocked by the same verdict.
             continue;
         }
@@ -678,30 +719,40 @@ pub async fn run_access_check(
                 .chain(std::iter::once(name.as_str()))
                 .collect();
             let child_decision = evaluate(access, groups, &child_segments);
-            let is_dir = item.file_type().await.map(|t| t.is_dir()).unwrap_or(false);
-            if child_decision.visible {
-                if is_dir {
-                    subdirs.push(if relative.is_empty() {
-                        name.clone()
-                    } else {
-                        format!("{relative}/{name}")
-                    });
+            // Child paths are evaluated too, so their rule usage counts.
+            for rule in rules.iter_mut() {
+                if let Some(allow_path) = &rule.allow_path {
+                    if allow_covers(allow_path, &child_segments) {
+                        rule.used = true;
+                    }
                 }
-                continue;
+                if let Some(pattern) = &rule.deny {
+                    if pattern.matches(&child_segments) {
+                        rule.used = true;
+                    }
+                }
             }
-            let kind = if is_dir {
-                "directory (everything underneath is blocked)"
-            } else {
-                "file"
-            };
-            let reason = match &child_decision.denial {
-                Some(AccessDenial::NoAllow) => "no allow entry matches".to_string(),
-                Some(AccessDenial::Denied { pattern, source }) => {
-                    format!("denied by \"{pattern}\" ({source})")
+            let is_dir = item.file_type().await.map(|t| t.is_dir()).unwrap_or(false);
+            match &child_decision {
+                AccessDecision::Visible { .. } => {
+                    if is_dir {
+                        subdirs.push(if relative.is_empty() {
+                            name.clone()
+                        } else {
+                            format!("{relative}/{name}")
+                        });
+                    }
+                    continue;
                 }
-                None => "hidden".to_string(),
-            };
-            blocked.push((format!("{name} ({kind}): {reason}"), name));
+                AccessDecision::Hidden(denial) => {
+                    let kind = if is_dir {
+                        "directory (everything underneath is blocked)"
+                    } else {
+                        "file"
+                    };
+                    blocked.push((format!("{name} ({kind}): {}", denial.reason()), name));
+                }
+            }
         }
 
         // Deterministic order: the blocked lists and the walk queue are
@@ -723,7 +774,85 @@ pub async fn run_access_check(
         queue.extend(subdirs);
     }
 
+    // Rules that matched nothing (ADR-0005 decision 9): reported plainly, no
+    // similarity hints. An allow entry naming a path the walk never evaluated
+    // and a deny pattern no evaluated path hits are both stale for this
+    // scenario.
+    let mut unmatched: Vec<String> = rules
+        .iter()
+        .filter(|rule| !rule.used)
+        .map(|rule| rule.label.clone())
+        .collect();
+    unmatched.sort();
+    if unmatched.is_empty() {
+        report.push_str("rules that matched nothing: none\n");
+    } else {
+        report.push_str("rules that matched nothing:\n");
+        for label in unmatched {
+            report.push_str(&format!("  {label}\n"));
+        }
+    }
+
     Ok(report)
+}
+
+/// One rule of the scenario's config with its operator-facing label, tracked
+/// during the check walk so rules that match nothing are reported. The label
+/// is the provenance form the report prints; the allow path and the deny
+/// pattern carry the matching the walk checks against.
+struct CheckRule {
+    label: String,
+    /// The plain allow path whose segment-prefix coverage is tracked; None
+    /// for deny rules.
+    allow_path: Option<String>,
+    /// The deny pattern whose match is tracked; None for allow rules.
+    deny: Option<DenyPattern>,
+    used: bool,
+}
+
+/// The scenario's rules as check-tracked entries: the global allow list and
+/// deny list, and each grant's allow entries with their paired allow-specific
+/// denies.
+fn check_rules(access: &AccessConfig) -> Vec<CheckRule> {
+    let mut rules = Vec::new();
+    for path in &access.global_allow {
+        rules.push(CheckRule {
+            label: format!("allow \"/{path}\" (global allow)"),
+            allow_path: Some(path.clone()),
+            deny: None,
+            used: false,
+        });
+    }
+    for pattern in &access.global_deny {
+        rules.push(CheckRule {
+            label: format!("denied by \"{}\" (global deny)", pattern.raw),
+            allow_path: None,
+            deny: Some(pattern.clone()),
+            used: false,
+        });
+    }
+    for (group, grant) in &access.grants {
+        for entry in grant {
+            rules.push(CheckRule {
+                label: format!("allow \"/{}\" (grant {group})", entry.path),
+                allow_path: Some(entry.path.clone()),
+                deny: None,
+                used: false,
+            });
+            for pattern in &entry.deny {
+                rules.push(CheckRule {
+                    label: format!(
+                        "denied by \"{}\" (allow-specific deny under \"/{}\" (grant {group}))",
+                        pattern.raw, entry.path
+                    ),
+                    allow_path: None,
+                    deny: Some(pattern.clone()),
+                    used: false,
+                });
+            }
+        }
+    }
+    rules
 }
 
 #[cfg(test)]
@@ -1098,11 +1227,37 @@ mod tests {
             ),
             "{report}"
         );
-        // The hidden /dev is not walked: its .env and main.rs never appear.
-        assert!(!report.contains(".env"), "{report}");
+        // The hidden /dev is not walked: its .env and main.rs never appear
+        // as blocked entries (the unused-rule section can name the global
+        // .env deny, which matches nothing in this scenario).
+        assert!(!report.contains(".env (file)"), "{report}");
         assert!(!report.contains("main.rs"), "{report}");
         // season-1 is visible and walked, with the .nfo blocked.
         assert!(report.contains("/tv-shows/season-1  visible"), "{report}");
+
+        // Rules that matched nothing in the scenario, reported plainly: the
+        // nonexistent /projects (the yafm-devs allow covers it but the walk
+        // never evaluates it), the yafm-devs deny with no matching entry, and
+        // the global denies that no evaluated path hits. The fired *.nfo deny
+        // is not among them, and neither is allow /dev: it covers the real
+        // blocked dev entry, so it is not stale.
+        assert!(report.contains("rules that matched nothing:"), "{report}");
+        assert!(
+            report.contains("allow \"/projects\" (grant yafm-devs)"),
+            "{report}"
+        );
+        assert!(
+            !report.contains("allow \"/dev\" (grant yafm-devs)"),
+            "{report}"
+        );
+        assert!(
+            report.contains("denied by \".git\" (global deny)"),
+            "{report}"
+        );
+        assert!(
+            !report.contains("rules that matched nothing:\n    denied by \"*.nfo\""),
+            "{report}"
+        );
 
         // A scenario with no allow entries at all (no global baseline and no
         // matching grants): the root is hidden and nothing is walked.
@@ -1116,6 +1271,52 @@ mod tests {
             .expect("the check report for an empty scenario");
         assert!(
             report.contains("/  hidden: no allow entry matches"),
+            "{report}"
+        );
+        // No rules configured: nothing to report as unused.
+        assert!(
+            report.contains("rules that matched nothing: none"),
+            "{report}"
+        );
+    }
+
+    /// A rule naming a path the walk never evaluates is reported: an allow
+    /// for a nonexistent directory and a deny pattern with no matching entry
+    /// (ADR-0005 decision 9, no similarity hints).
+    #[tokio::test]
+    async fn the_access_check_reports_rules_that_match_nothing() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let root = temp.path().join("share");
+        fs::create_dir_all(root.join("common")).expect("create the tree");
+
+        let config = AccessConfig {
+            global_allow: vec![validate_allow_path("/common").expect("the root allow")],
+            global_deny: deny_patterns(&[".env", "stale/**"]),
+            grants: BTreeMap::from([(
+                "yafm-devs".to_string(),
+                vec![AllowEntry {
+                    path: validate_allow_path("/missing").expect("the allow path"),
+                    deny: Vec::new(),
+                }],
+            )]),
+        };
+        let report = run_access_check(&root, &config, &["yafm-devs".to_string()])
+            .await
+            .expect("the check report");
+
+        assert!(report.contains("rules that matched nothing:"), "{report}");
+        // The allow names a directory that does not exist on disk.
+        assert!(
+            report.contains("allow \"/missing\" (grant yafm-devs)"),
+            "{report}"
+        );
+        // The deny patterns match no evaluated path in this scenario.
+        assert!(
+            report.contains("denied by \".env\" (global deny)"),
+            "{report}"
+        );
+        assert!(
+            report.contains("denied by \"stale/**\" (global deny)"),
             "{report}"
         );
     }

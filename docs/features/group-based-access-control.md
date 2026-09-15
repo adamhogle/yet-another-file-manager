@@ -133,12 +133,15 @@ Failure modes:
   itself is browsable for a user whose visible root is non-empty (only its entries
   are filtered); a user with no allow entries at all gets 404 on the root listing.
 - Deny pattern grammar follows gitignore's glob semantics: `*` matches anything
-  except `/` within one segment, `**` matches across segments, a bare name (no
-  slash, no glob) matches that file or directory name at any depth. Allows take no
-  wildcards: exposing a subtree means naming its parent.
+  except `/` within one segment, `?` matches one character, `**` matches across
+  segments, a bare name (no slash, no glob) matches that file or directory name at
+  any depth. Allows take no wildcards: exposing a subtree means naming its parent.
 - Enforcement: the middleware evaluates the access decision once, after session
-  verification, and stores it in request extensions; listing and download handlers
-  read the pre-computed decision so the discipline cannot drift between endpoints.
+  verification, and stores the access context (the scenario's groups and the
+  config) in request extensions; the download handler never re-evaluates (the
+  gate answers 404 for hidden request paths and is the enforcement point), and
+  the listing handler filters each entry with the pure evaluation function read
+  from the extension context, so the discipline cannot drift between endpoints.
   The evaluation is a pure function of the claims and the config (testable like
   `gate_decision`). Deny rules hold for the fully-decoded form of a path too:
   when the once-decoded request path differs from the form the handlers open

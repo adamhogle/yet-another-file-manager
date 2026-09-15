@@ -69,8 +69,9 @@ guess.
    allow entries at all gets 404 on the root listing, which the SPA maps to the
    explicit no-access state.
 5. **Deny patterns use gitignore glob semantics and match files and directories.**
-   `*` matches within one path segment, `**` across segments, a bare name (no slash,
-   no glob) matches that file or directory name at any depth. A pattern containing a
+   `*` matches within one path segment, `?` matches one character, `**` across
+   segments, a bare name (no slash, no glob) matches that file or directory name at
+   any depth. A pattern containing a
    `/` is anchored to the shared root and matches a prefix of the path's segments
    starting at the first segment, so a denied directory hides everything underneath
    it; `**` follows gitignore (zero or more segments as a middle segment, one or more
@@ -86,11 +87,14 @@ guess.
    while other paths keep `.nfo` visible. No "which deny goes with which allow"
    puzzle when a grant has multiple allows.
 7. **Enforcement is evaluated once per request in the gate middleware.** After
-   session verification, the middleware computes the access decision from the
-   cookie's claims and the config and stores it in request extensions; listing and
-   download handlers read the pre-computed decision. One evaluation point means the
-   discipline cannot drift between endpoints, and the evaluation is a pure function
-   testable like `gate_decision`.
+   session verification, the middleware computes the request path's access
+   decision from the cookie's claims and the config, answers 404 for hidden
+   paths, and stores the access context (the scenario's groups and the config)
+   in request extensions; the download handler never re-evaluates (the gate is
+   the enforcement point) and the listing handler filters each entry with the
+   same pure evaluation function read from the extension context. One evaluation
+   source means the discipline cannot drift between endpoints, and the
+   evaluation is a pure function testable like `gate_decision`.
 8. **Hidden paths answer 404.** A request path outside the visible root (listing a
    hidden folder, downloading a hidden file by name) is indistinguishable from a
    nonexistent path: no existence leak, aligned with "cannot be seen". The SPA maps
@@ -104,7 +108,10 @@ guess.
    caused each decision (global deny, or allow-specific deny under which allow, from
    which grant). Rules that match nothing are reported plainly, no fuzzy or
    similarity reasoning: the filesystem is case-sensitive and the report's job is to
-   confirm the rules are correct and expected paths are actually hit.
+   confirm the rules are correct and expected paths are actually hit. The walk
+   tracks rule usage against the paths it evaluates (an allow when its coverage
+   covers one, a deny when its pattern matches one) and lists the rules that
+   matched nothing in the scenario at the end of the report.
 10. **Claims staleness is accepted.** Groups are frozen for the life of the session;
     a group change in authentik takes effect at the next login. This matches the
     session-TTL trade-off already accepted in ADR-0004; the escape hatch if it

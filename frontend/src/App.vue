@@ -1,6 +1,12 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
-import { buildDownloadHref, fetchDirectory, fetchIdentity, toChildPath } from './lib/api/client';
+import {
+  ApiHttpError,
+  buildDownloadHref,
+  fetchDirectory,
+  fetchIdentity,
+  toChildPath
+} from './lib/api/client';
 import type { DirectoryEntry, UserInfoResponse } from './lib/api/client';
 import { formatSize, formatModified } from './lib/format';
 
@@ -65,9 +71,9 @@ async function loadDirectory(path: string, updateHistory = true): Promise<void> 
     // A 404 on the root listing means the visible root is empty for this
     // account (the root always exists server-side, so 404 there can only be
     // no access): the explicit no-access state. Any other 404 is a
-    // nonexistent path; other errors are shown as before. The HTTP status
-    // rides the generated client's error.
-    const status = (error as { status?: number }).status;
+    // nonexistent path; other errors are shown as before. The status rides
+    // the generated client's ApiHttpError.
+    const status = error instanceof ApiHttpError ? error.status : undefined;
     if (status === 404 && path === '') {
       noAccess.value = true;
     } else {

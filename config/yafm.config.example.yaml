@@ -12,9 +12,10 @@ listenPort: 8080
 # filtered to the names below), minus every matching deny. Order does not
 # matter; denied means nothing underneath it is accessible. Allows are plain
 # paths ("/" is the root itself); deny patterns use gitignore glob semantics
-# (`*` within a segment, `**` across segments, a bare name matches at any
-# depth) and match files and directories. Verify the mapping without serving
-# traffic: backend --check-access --groups <comma-separated groups> [config-path]
+# (`*` within a segment, `?` one character, `**` across segments, a bare name
+# matches at any depth) and match files and directories. Verify the mapping
+# without serving traffic: backend --check-access --groups <comma-separated
+# groups> [config-path]
 access:
   # Global baseline: every user sees this, regardless of groups.
   allow: ['/common']
