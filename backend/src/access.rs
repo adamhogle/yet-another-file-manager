@@ -135,10 +135,10 @@ pub enum AccessDenial {
 /// debug-gated `YAFM_DISABLE_AUTH` path skips this initializer alongside the
 /// oidc requirement, preserving the test binaries' behavior.
 pub fn initialize_access() -> Result<(), String> {
-    let _ = get_access_config().ok_or_else(|| {
+    get_access_config().ok_or_else(|| {
         "Configuration access is required; the backend refuses to start without an access configuration."
             .to_string()
-    });
+    })?;
     Ok(())
 }
 
@@ -545,10 +545,54 @@ fn path_segments(relative: &str) -> Vec<&str> {
     }
 }
 
+/// The fully-decoded form of an API-rendered path: the form the handlers
+/// open through the percent-decode fallback when the literal form does not
+/// exist. Access rules must hold for the decoded form too, or a request that
+/// only resolves after a second decode would bypass the deny rules (the gate
+/// evaluates the once-decoded request path; the handler opens the decoded
+/// path). Returns None when the decode is invalid (a component decoding to
+/// `/`, `\\`, NUL or `..`) or when the decoded bytes are not valid UTF-8:
+/// the handlers reject such requests and the decoded form cannot be
+/// referenced by deny patterns, so the literal evaluation decides.
+fn decode_equivalent(relative: &str) -> Option<String> {
+    let mut decoded = String::new();
+    let mut first = true;
+    for component in relative.split('/') {
+        if !first {
+            decoded.push('/');
+        }
+        first = false;
+        let bytes = crate::percent_decode_bytes(component);
+        if bytes.contains(&b'/') || bytes.contains(&b'\\') || bytes.contains(&0) || bytes == b".." {
+            return None;
+        }
+        match std::str::from_utf8(&bytes) {
+            // Empty components carry no path information and decode away.
+            Ok("") => {}
+            Ok(text) => decoded.push_str(text),
+            Err(_) => return None,
+        }
+    }
+    Some(decoded)
+}
+
 /// The runtime visibility check for a validated relative path: the access
-/// decision the handlers and the access gate middleware act on.
+/// decision the handlers and the access gate middleware act on. Deny wins
+/// over the decode equivalence: when the fully-decoded form differs, it must
+/// also be visible, or the percent-decode fallback would serve a denied file
+/// for a request whose literal form matches no deny. An invalid decode means
+/// the handlers reject the decoded form anyway, so the literal evaluation
+/// decides.
 pub fn is_path_visible(access: &AccessConfig, groups: &[String], relative: &str) -> bool {
-    evaluate(access, groups, &path_segments(relative)).visible
+    if !evaluate(access, groups, &path_segments(relative)).visible {
+        return false;
+    }
+    match decode_equivalent(relative) {
+        Some(decoded) if decoded != relative => {
+            evaluate(access, groups, &path_segments(&decoded)).visible
+        }
+        _ => true,
+    }
 }
 
 /// One line of the `--check-access` report for a directory: the verdict for
@@ -729,6 +773,53 @@ mod tests {
     fn visible(config: &AccessConfig, groups: &[&str], relative: &str) -> bool {
         let groups: Vec<String> = groups.iter().map(|g| g.to_string()).collect();
         is_path_visible(config, &groups, relative)
+    }
+
+    #[test]
+    fn initialize_access_requires_the_access_block() {
+        // The OnceCell global is uninitialized in this test binary: a missing
+        // `access` block must abort startup, not start the server with no
+        // access configuration (ADR-0005, fail closed).
+        let error = initialize_access().expect_err("a missing access block aborts startup");
+        assert_eq!(
+            error,
+            "Configuration access is required; the backend refuses to start without an access configuration."
+        );
+    }
+
+    #[test]
+    fn the_decode_equivalent_form_cannot_bypass_the_deny_rules() {
+        let config = example_config();
+        let tv = ["yafm-tv"];
+
+        // The percent-encoded forms the handlers open through the
+        // percent-decode fallback: the literal evaluation alone sees no deny
+        // match, but the fully-decoded form is a denied file. Deny wins over
+        // the decode class, so the encoded attempt is not visible either.
+        assert!(decode_equivalent("show.s01e01%2Enfo") == Some("show.s01e01.nfo".to_string()));
+        assert!(!visible(&config, &tv, "tv-shows/season-1/show.s01e01.nfo"));
+        assert!(!visible(
+            &config,
+            &tv,
+            "tv-shows/season-1/show.s01e01%2Enfo"
+        ));
+
+        // The same for an anchored allow-specific deny: dev/%74mp/x only
+        // resolves to dev/tmp/x after the second decode, and the encoded
+        // attempt is not visible.
+        let devs = ["yafm-devs"];
+        assert!(!visible(&config, &devs, "dev/tmp/x"));
+        assert!(!visible(&config, &devs, "dev/%74mp/x"));
+
+        // Allowed encoded names stay resolvable: the decoded form is visible.
+        assert!(visible(&config, &devs, "dev/main%2Ers"));
+
+        // Invalid decodes are rejected by the handlers anyway, so the literal
+        // evaluation decides.
+        assert!(decode_equivalent("a%252Fb") == Some("a%2Fb".to_string()));
+        assert!(decode_equivalent("a%2Fb").is_none());
+        assert!(decode_equivalent("%2E%2E").is_none());
+        assert!(decode_equivalent("a%2E%2Eb") == Some("a..b".to_string()));
     }
 
     #[test]

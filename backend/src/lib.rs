@@ -534,7 +534,7 @@ fn percent_encode_entry_name(raw: &OsStr) -> String {
 
 /// Percent-decodes one string into raw bytes. Malformed escapes (`%` not followed by
 /// two hex digits) are passed through literally, matching the WHATWG decode behavior.
-fn percent_decode_bytes(input: &str) -> Vec<u8> {
+pub(crate) fn percent_decode_bytes(input: &str) -> Vec<u8> {
     let bytes = input.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
     let mut index = 0;

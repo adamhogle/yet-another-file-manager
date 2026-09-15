@@ -1148,6 +1148,12 @@ async fn exchange_code_and_validate_id_token(
 fn session_claims_from_id_token(
     claims: &IdTokenClaims<ExtraIdTokenClaims, CoreGenderClaim>,
 ) -> SessionClaims {
+    let email = claims
+        .email()
+        .map(|value| value.to_string())
+        .unwrap_or_default();
+    // The display chain is `preferred_username` -> `name` -> `email`, then
+    // empty (surfaced as the subject by `users/me`).
     let display_name = claims
         .preferred_username()
         .map(|value| value.to_string())
@@ -1159,10 +1165,14 @@ fn session_claims_from_id_token(
                     .map(|value| value.to_string())
             })
         })
-        .unwrap_or_default();
-    let email = claims
-        .email()
-        .map(|value| value.to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            if email.is_empty() {
+                None
+            } else {
+                Some(email.clone())
+            }
+        })
         .unwrap_or_default();
     let groups = claims
         .additional_claims()
@@ -1668,9 +1678,9 @@ mod tests {
     }
 
     /// The display-name fallback chain: no preferred_username falls back to
-    /// `name` (the untagged value first), then to an empty string.
+    /// `name` (the untagged value first), then to `email`, then to empty.
     #[test]
-    fn the_display_name_falls_back_to_name_then_empty() {
+    fn the_display_name_falls_back_to_name_then_email() {
         let base = |preferred: Option<String>, name: Option<String>| {
             let mut standard = openidconnect::StandardClaims::new(
                 openidconnect::SubjectIdentifier::new("sub".to_string()),
@@ -1696,8 +1706,10 @@ mod tests {
         let session = session_claims_from_id_token(&base(None, Some("Alice Name".to_string())));
         assert_eq!(session.display_name, "Alice Name");
 
+        // No preferred_username and no name: the email becomes the display
+        // name.
         let session = session_claims_from_id_token(&base(None, None));
-        assert_eq!(session.display_name, "");
+        assert_eq!(session.display_name, "alice@example.com");
         assert_eq!(session.email, "alice@example.com");
     }
 

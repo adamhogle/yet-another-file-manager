@@ -140,7 +140,11 @@ Failure modes:
   verification, and stores it in request extensions; listing and download handlers
   read the pre-computed decision so the discipline cannot drift between endpoints.
   The evaluation is a pure function of the claims and the config (testable like
-  `gate_decision`).
+  `gate_decision`). Deny rules hold for the fully-decoded form of a path too:
+  when the once-decoded request path differs from the form the handlers open
+  through the percent-decode fallback, a deny matching the decoded form wins, so
+  a request that only resolves after a second decode cannot bypass the rules.
+  The required access block aborts startup when missing (fail closed).
 - Hidden paths: a request path outside the visible root (listing a hidden folder,
   downloading a hidden file by name) answers 404 with the existing error shape, so
   hidden and nonexistent are indistinguishable and no existence leaks.
