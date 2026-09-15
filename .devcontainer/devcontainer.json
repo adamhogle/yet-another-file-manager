@@ -27,5 +27,5 @@
   },
   "overrideCommand": true,
   "remoteUser": "node",
-  "postCreateCommand": "git config --global --add safe.directory ${containerWorkspaceFolder}"
+  "postCreateCommand": "(test -x $HOME/.cache/camoufox/camoufox-bin || npx -y camoufox-js@0.9.3 fetch); git config --global --add safe.directory ${containerWorkspaceFolder}"
 }

@@ -245,7 +245,11 @@ function renderOperation(method, rawPath, operation) {
     } catch {
       // Non-JSON or non-conforming body: keep the fallback message.
     }
-    throw new Error(message);
+    // The HTTP status rides the error so callers can distinguish failure
+    // classes (the backend's 404 for hidden paths vs other errors). The
+    // message alone carries the backend's PublicErrorResponse text, which is
+    // deliberately shared between hidden and nonexistent paths.
+    throw new ApiHttpError(message, response.status);
   }
 
   ${successReturn}
@@ -287,7 +291,10 @@ async function main() {
 
   const hasSchemas = schemasByName.size > 0;
   const zodImport = hasSchemas ? "import { z } from 'zod';\n\n" : '';
-  const content = `// AUTO-GENERATED FILE. DO NOT EDIT.\n// Source: api/openapi.yaml\n\n${zodImport}export const DEFAULT_BASE_URL = '';\n\n${renderSchemaSection(schemasByName)}\n\n${operations.join('\n')}`;
+  const errorClass = hasSchemas
+    ? "export class ApiHttpError extends Error {\n  status: number;\n\n  constructor(message: string, status: number) {\n    super(message);\n    this.name = 'ApiHttpError';\n    this.status = status;\n  }\n}\n\n"
+    : '';
+  const content = `// AUTO-GENERATED FILE. DO NOT EDIT.\n// Source: api/openapi.yaml\n\n${zodImport}${errorClass}export const DEFAULT_BASE_URL = '';\n\n${renderSchemaSection(schemasByName)}\n\n${operations.join('\n')}`;
 
   await fs.mkdir(path.dirname(outputPath), { recursive: true });
   await fs.writeFile(outputPath, content, 'utf8');

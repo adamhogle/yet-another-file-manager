@@ -74,6 +74,18 @@ Configuration fields:
 - `oidc.cookieSecure` (optional, default `false`): must be `true` when `redirectUri` is https,
   startup refuses the mismatch. Set `false` explicitly only with a loopback http `redirectUri`
   for plain-HTTP local development.
+- `access` (required): the group-based access control block (ADR-0005). A user's visible
+  root is the union of the global allow list and the allow entries of their authentik
+  groups (from the ID token's `groups` claim, filtered to the names configured below),
+  minus every matching deny. Order does not matter; denied means nothing underneath it
+  is accessible, and hidden paths answer 404 so they are indistinguishable from
+  nonexistent ones. Allows are plain paths (`/` is the root itself); deny patterns use
+  gitignore glob semantics (`*` within a segment, `**` across segments, a bare name
+  matches a file or directory at any depth) and match files and directories, enforced
+  identically on listings and downloads. The mapping is verified without serving
+  traffic: `backend --check-access --groups <comma-separated groups> [config-path]`
+  starts with the real config, walks the real shared root for the scenario's groups and
+  prints the verdicts with the rule that caused each one.
 
 ## Authentication
 
@@ -94,7 +106,9 @@ client id and secret the backend gets from the `oidc` config block):
   Authentik's default issuer mode is per-provider:
   `https://authentik.company/application/o/<application slug>/`.
 
-Then point the backend at it:
+Then point the backend at it (the `groups` scope must be added to the application for
+the group-based access control to apply; without it every user sees only the global
+baseline):
 
 ```yaml
 oidc:
@@ -122,6 +136,15 @@ YAFM_DISABLE_AUTH=1 npm run dev
 
 With the flag set, the backend runs with the test-only disabled auth state and no `oidc`
 block is needed.
+
+### Logged-in user and access control
+
+The SPA shows the logged-in user in the upper-right-hand corner with a logout action;
+the identity comes from the session cookie's claims through `GET /api/v1/users/me`, and
+logout navigates to `GET /api/v1/auth/logout`. The access rules limit what each user and
+group can see (see the `access` config field above); a user with no allow entries at all
+sees an explicit no-access state. The design is recorded in
+`docs/architecture/0005-group-based-access-control.md`.
 
 ## Scripts
 

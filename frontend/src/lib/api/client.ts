@@ -1,9 +1,11 @@
-import { getApiV1Directory } from './generated/client';
-import type { DirectoryListing } from './generated/client';
+import { getApiV1Directory, getApiV1UsersMe } from './generated/client';
+import type { DirectoryListing, UserInfoResponse } from './generated/client';
 
 const DEFAULT_BASE_URL = '';
 // The OIDC login endpoint the auth gate's 302 redirects browsers to; the
-// wrapper sends an expired session through it on a failed directory fetch.
+// wrapper sends an expired session through it on a failed directory fetch,
+// carrying the current path as returnTo so the user lands back where they
+// were after re-login.
 const LOGIN_PATH = '/api/v1/auth/login';
 
 export function toChildPath(currentPath: string, childName: string): string {
@@ -23,18 +25,46 @@ export function buildDownloadHref(
   return `${baseUrl}/api/v1/download?${params.toString()}`;
 }
 
-// The generated client throws a plain Error on any non-ok response, with the
-// status only inside the message string, so a failed directory fetch cannot
-// distinguish 401 from network errors. The probe asks the backend directly:
-// a 401 means the session was rejected and the browser should log in again,
-// while network errors and other backend failures (503 shared-dir
-// unavailable) are not auth errors.
+// The gate rejected the session: send the browser through the OIDC login
+// redirect with the current location (path + query) as the returnTo value, so
+// re-login lands back on the page the user was on. A never-resolving promise
+// keeps the caller from rendering an error panel before the navigation
+// happens.
+function redirectToLogin(): Promise<never> {
+  const returnTo = window.location.pathname + window.location.search;
+  const target = `${LOGIN_PATH}?returnTo=${encodeURIComponent(returnTo)}`;
+  window.location.assign(target);
+  return new Promise<never>(() => undefined);
+}
+
 async function isUnauthenticated(): Promise<boolean> {
   try {
     const response = await fetch('/api/v1/health');
     return response.status === 401;
   } catch {
     return false;
+  }
+}
+
+// The authenticated identity for the user menu: read from the session cookie
+// through the backend, no provider contact. A 401 means the session was
+// rejected and the browser should log in again.
+export async function fetchIdentity(baseUrl: string = DEFAULT_BASE_URL): Promise<UserInfoResponse> {
+  try {
+    return await getApiV1UsersMe(
+      baseUrl,
+      {},
+      {
+        headers: {
+          Accept: 'application/json'
+        }
+      }
+    );
+  } catch (error) {
+    if (await isUnauthenticated()) {
+      return redirectToLogin();
+    }
+    throw error;
   }
 }
 
@@ -50,14 +80,12 @@ export async function fetchDirectory(
     });
   } catch (error) {
     if (await isUnauthenticated()) {
-      // The gate rejected the session: send the browser through the OIDC login
-      // redirect. A never-resolving promise keeps the caller from rendering an
-      // error panel before the navigation happens.
-      window.location.assign(LOGIN_PATH);
-      return new Promise<DirectoryListing>(() => undefined);
+      // The gate rejected the session: send the browser through the OIDC
+      // login redirect with the current path as returnTo.
+      return redirectToLogin();
     }
     throw error;
   }
 }
 
-export type { DirectoryEntry, DirectoryListing } from './generated/client';
+export type { DirectoryEntry, DirectoryListing, UserInfoResponse } from './generated/client';
