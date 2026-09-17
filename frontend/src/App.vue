@@ -499,7 +499,9 @@ h1 {
   fill: #c23b32;
 }
 
-.error-actions {
+/* Scoped under .error-panel so the reset outranks the .error-panel p
+   rule (class + element beats the bare class in the cascade). */
+.error-panel .error-actions {
   padding: 0.8rem;
   padding-top: 0;
 }
