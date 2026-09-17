@@ -107,6 +107,11 @@ contract:check`).
 - The user menu is a frontend component in `frontend/src/`, rendered by the SPA shell
   (`App.vue` today); logout is a browser navigation to the existing logout endpoint,
   not a generated-client call.
+- Error recovery: a 404 on a non-root listing (a directory moved or deleted while
+  it is open, or a stale URL) renders an alert-styled error panel with a
+  `Back to root` action that navigates to the root and replaces the stale path in
+  the URL, so a reload does not land in the error again. The no-access state stays
+  a neutral notice panel without the error styling.
 - The 401 auto-recovery rides the wrapper client's existing error path (the
   probe-on-error behavior described in `docs/features/oidc-authentication.md`),
   extended to redirect to login with the current path as `returnTo`.
