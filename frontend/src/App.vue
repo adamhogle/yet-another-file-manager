@@ -1,7 +1,13 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
-import { buildDownloadHref, fetchDirectory, toChildPath } from './lib/api/client';
-import type { DirectoryEntry } from './lib/api/client';
+import {
+  ApiHttpError,
+  buildDownloadHref,
+  fetchDirectory,
+  fetchIdentity,
+  toChildPath
+} from './lib/api/client';
+import type { DirectoryEntry, UserInfoResponse } from './lib/api/client';
 import { formatSize, formatModified } from './lib/format';
 
 const title = 'Yet Another File Manager';
@@ -11,6 +17,13 @@ const currentPath = ref('');
 const entries = ref<DirectoryEntry[]>([]);
 const errorMessage = ref('');
 const isLoading = ref(true);
+const noAccess = ref(false);
+const identity = ref<UserInfoResponse | null>(null);
+
+// The logout endpoint: a plain browser navigation the gate exempts; the
+// backend clears the session cookie and redirects to authentik's end-session
+// endpoint.
+const logoutHref = '/api/v1/auth/logout';
 
 const breadcrumbs = computed(() => {
   const segments = currentPath.value ? currentPath.value.split('/').filter(Boolean) : [];
@@ -43,6 +56,7 @@ function updateUrl(path: string): void {
 async function loadDirectory(path: string, updateHistory = true): Promise<void> {
   isLoading.value = true;
   errorMessage.value = '';
+  noAccess.value = false;
 
   try {
     const listing = await fetchDirectory(path);
@@ -54,8 +68,18 @@ async function loadDirectory(path: string, updateHistory = true): Promise<void> 
     }
   } catch (error) {
     entries.value = [];
-    errorMessage.value =
-      error instanceof Error ? error.message : 'The shared directory is unavailable.';
+    // A 404 on the root listing means the visible root is empty for this
+    // account (the root always exists server-side, so 404 there can only be
+    // no access): the explicit no-access state. Any other 404 is a
+    // nonexistent path; other errors are shown as before. The status rides
+    // the generated client's ApiHttpError.
+    const status = error instanceof ApiHttpError ? error.status : undefined;
+    if (status === 404 && path === '') {
+      noAccess.value = true;
+    } else {
+      errorMessage.value =
+        error instanceof Error ? error.message : 'The shared directory is unavailable.';
+    }
   } finally {
     isLoading.value = false;
   }
@@ -70,6 +94,15 @@ onMounted(() => {
   window.addEventListener('popstate', () => {
     loadDirectory(readPathFromUrl(), false);
   });
+  // The identity loads in the background: the directory listing must not
+  // wait for it, and the menu renders when it arrives.
+  fetchIdentity()
+    .then((info) => {
+      identity.value = info;
+    })
+    .catch(() => {
+      identity.value = null;
+    });
 });
 </script>
 
@@ -80,9 +113,23 @@ onMounted(() => {
         <img class="app-logo" src="/yafm-logo.svg" alt="Yet Another File Manager logo" />
         <span>{{ title }}</span>
       </h1>
+      <nav v-if="identity" class="user-menu" aria-label="Account">
+        <span class="user-name" :title="identity.email ?? identity.subject">{{
+          identity.displayName
+        }}</span>
+        <a class="user-logout" :href="logoutHref" aria-label="Log out">Log out</a>
+      </nav>
     </header>
 
-    <section v-if="errorMessage" class="panel error-panel">
+    <section v-if="noAccess" class="panel error-panel">
+      <h2>No visible files</h2>
+      <p>
+        No folders are shared with your account. Ask the operator to add your groups to the access
+        configuration.
+      </p>
+    </section>
+
+    <section v-else-if="errorMessage" class="panel error-panel">
       <h2>Directory unavailable</h2>
       <p>{{ errorMessage }}</p>
     </section>
@@ -181,6 +228,45 @@ onMounted(() => {
 
 .page-header {
   margin-bottom: 0.6rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  min-width: 0;
+}
+
+.user-menu {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+  flex-shrink: 0;
+}
+
+.user-name {
+  font-size: 0.82rem;
+  color: #243242;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 12rem;
+}
+
+.user-logout {
+  font-size: 0.78rem;
+  color: #0b57a1;
+  border: 1px solid #d8e2ee;
+  border-radius: 0.3rem;
+  padding: 0.22rem 0.55rem;
+  text-decoration: none;
+  background: #f7fafc;
+  white-space: nowrap;
+}
+
+.user-logout:hover {
+  text-decoration: underline;
+  background: #eef4fa;
 }
 
 .page-footer {
@@ -366,6 +452,19 @@ h1 {
 @media (max-width: 640px) {
   .page-shell {
     padding-inline: 0.55rem;
+  }
+
+  /* The user menu keeps its place in the header on a phone viewport: only
+     the display name is allowed to shrink, and the email tooltip carries
+     the rest. */
+  .user-name {
+    max-width: 7rem;
+    font-size: 0.78rem;
+  }
+
+  .user-logout {
+    font-size: 0.75rem;
+    padding: 0.2rem 0.45rem;
   }
 
   .breadcrumb-link,

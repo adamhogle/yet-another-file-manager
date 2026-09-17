@@ -28,6 +28,77 @@ fn resolve_config_path(args: impl Iterator<Item = String>, cwd: &Path) -> Result
     )
 }
 
+/// The parsed startup options: the `--check-access` verification mode with its
+/// `--groups` scenario, and the optional config path.
+#[derive(Debug, Default)]
+struct StartupOptions {
+    check_access: bool,
+    groups: Vec<String>,
+    config_path: PathBuf,
+}
+
+/// Parses the CLI flags and resolves the config path. `--groups` requires
+/// `--check-access` and a non-empty comma-separated list: the check walks the
+/// real shared root for the scenario's groups, so an empty scenario is a
+/// mistake. Positional arguments beyond the config path are refused.
+fn resolve_startup_options(
+    args: impl Iterator<Item = String>,
+    cwd: &Path,
+) -> Result<StartupOptions, String> {
+    let collected: Vec<String> = args.collect();
+    let mut check_access = false;
+    let mut groups: Option<String> = None;
+    let mut positional: Vec<String> = Vec::new();
+    let mut iter = collected.into_iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--check-access" => check_access = true,
+            "--groups" => {
+                groups = Some(iter.next().ok_or_else(|| {
+                    "Usage: backend --check-access --groups <comma-separated groups> [config-path]"
+                        .to_string()
+                })?);
+            }
+            _ => positional.push(arg),
+        }
+    }
+    if groups.is_some() && !check_access {
+        return Err(
+            "Usage: --groups requires --check-access; the groups scenario is only evaluated by the access check."
+                .to_string(),
+        );
+    }
+    if check_access && groups.is_none() {
+        return Err(
+            "Usage: --check-access requires --groups; the check walks the real shared root for the scenario's groups."
+                .to_string(),
+        );
+    }
+    let groups = match groups {
+        Some(raw) => {
+            let parsed: Vec<String> = raw
+                .split(',')
+                .map(|group| group.trim().to_string())
+                .filter(|group| !group.is_empty())
+                .collect();
+            if parsed.is_empty() {
+                return Err(
+                    "Usage: --groups requires at least one group name; the access check walks the real shared root for the scenario's groups."
+                        .to_string(),
+                );
+            }
+            parsed
+        }
+        None => Vec::new(),
+    };
+    let config_path = resolve_config_path(positional.into_iter(), cwd)?;
+    Ok(StartupOptions {
+        check_access,
+        groups,
+        config_path,
+    })
+}
+
 #[tokio::main]
 async fn main() {
     if let Err(message) = run().await {
@@ -52,8 +123,8 @@ async fn run() -> Result<(), String> {
 
     let cwd =
         env::current_dir().map_err(|_| "Could not determine current directory".to_string())?;
-    let config_path = resolve_config_path(env::args().skip(1), &cwd)?;
-    backend::initialize_app_config(&config_path)?;
+    let options = resolve_startup_options(env::args().skip(1), &cwd)?;
+    backend::initialize_app_config(&options.config_path)?;
 
     // In release builds the test-only env var is ignored; warn so a stray flag
     // is visible instead of silently dropped.
@@ -75,6 +146,27 @@ async fn run() -> Result<(), String> {
         backend::auth::initialize_auth_disabled_for_tests();
     } else {
         backend::auth::initialize_auth()?;
+        // The access config is required for real startups (ADR-0005): the
+        // backend refuses to change what users can see silently. The debug
+        // backdoor skips it alongside the oidc requirement, preserving the
+        // test binaries' pre-access behavior.
+        backend::access::initialize_access()?;
+    }
+
+    // The access check: a one-shot verification mode. The server starts with
+    // the full production config (including the oidc block; iterating rules
+    // needs no authentik contact since discovery is lazy), walks the real
+    // shared root for the scenario's groups, prints the report and exits
+    // without serving.
+    if options.check_access {
+        let shared_root = backend::get_shared_root()
+            .ok_or_else(|| "Application configuration was not initialized".to_string())?;
+        let access = backend::access::get_access_config()
+            .ok_or_else(|| "Configuration access is required for the access check.".to_string())?;
+        let report =
+            backend::access::run_access_check(shared_root, access, &options.groups).await?;
+        print!("{report}");
+        return Ok(());
     }
 
     let binding = backend::get_server_binding()?;
@@ -105,7 +197,7 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::resolve_config_path;
+    use super::{resolve_config_path, resolve_startup_options};
 
     #[test]
     fn resolves_explicit_config_path_from_cli_argument() {
@@ -138,5 +230,93 @@ mod tests {
             .expect_err("missing config should fail");
 
         assert!(error.contains("Configuration path argument is required"));
+    }
+
+    #[test]
+    fn resolves_the_check_access_flags_and_the_config_path() {
+        let cwd = TempDir::new().expect("temp dir");
+        let config_path = cwd.path().join("config.yaml");
+        fs::write(&config_path, "sharedRoot: /tmp\n").expect("write config");
+
+        let options = resolve_startup_options(
+            [
+                "--check-access".to_string(),
+                "--groups".to_string(),
+                "yafm-tv, yafm-devs".to_string(),
+                config_path.display().to_string(),
+            ]
+            .into_iter(),
+            cwd.path(),
+        )
+        .expect("resolve options");
+
+        assert!(options.check_access);
+        assert_eq!(
+            options.groups,
+            vec!["yafm-tv".to_string(), "yafm-devs".to_string()]
+        );
+        assert_eq!(options.config_path, config_path);
+    }
+
+    #[test]
+    fn the_check_flags_work_without_an_explicit_config_path() {
+        let cwd = TempDir::new().expect("temp dir");
+        let config_path = cwd.path().join("config.yaml");
+        fs::write(&config_path, "sharedRoot: /tmp\n").expect("write config");
+
+        let options = resolve_startup_options(
+            [
+                "--check-access".to_string(),
+                "--groups".to_string(),
+                "yafm-tv".to_string(),
+            ]
+            .into_iter(),
+            cwd.path(),
+        )
+        .expect("resolve options");
+
+        assert!(options.check_access);
+        assert_eq!(options.config_path, config_path);
+    }
+
+    #[test]
+    fn groups_requires_check_access_and_a_non_empty_list() {
+        let cwd = TempDir::new().expect("temp dir");
+        let error = resolve_startup_options(
+            ["--groups".to_string(), "yafm-tv".to_string()].into_iter(),
+            cwd.path(),
+        )
+        .expect_err("--groups without --check-access must be refused");
+        assert!(error.contains("requires --check-access"));
+
+        let error = resolve_startup_options(
+            [
+                "--check-access".to_string(),
+                "--groups".to_string(),
+                " , ".to_string(),
+            ]
+            .into_iter(),
+            cwd.path(),
+        )
+        .expect_err("an empty group list must be refused");
+        assert!(error.contains("at least one group name"));
+
+        let error = resolve_startup_options(
+            ["--check-access".to_string(), "--groups".to_string()].into_iter(),
+            cwd.path(),
+        )
+        .expect_err("a missing --groups value must be refused");
+        assert!(error.contains("Usage:"));
+    }
+
+    #[test]
+    fn extra_positional_arguments_are_refused() {
+        let cwd = TempDir::new().expect("temp dir");
+        let error = resolve_startup_options(
+            ["one".to_string(), "two".to_string()].into_iter(),
+            cwd.path(),
+        )
+        .expect_err("two positional arguments must be refused");
+        assert!(error.contains("Usage:"));
     }
 }

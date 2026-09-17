@@ -9,8 +9,9 @@ use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::body::Body;
-use axum::extract::{OriginalUri, Query};
+use axum::extract::{Extension, OriginalUri, Query, Request};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
@@ -29,8 +30,10 @@ compile_error!("yet-another-file-manager targets unix (Linux); non-unix builds a
 use tower_http::trace::TraceLayer;
 use utoipa::{OpenApi, ToSchema};
 
+pub mod access;
 pub mod auth;
 use auth::AuthOidcConfig;
+use auth::SessionClaims;
 // Re-exported at the crate root so test binaries can call the test-only init
 // through the existing `backend::` getter pattern (the auth gate test wires it
 // before building the router).
@@ -77,6 +80,17 @@ pub struct DirectoryListing {
     pub entries: Vec<DirectoryEntry>,
 }
 
+/// The authenticated user's identity, served by `GET /api/v1/users/me` from
+/// the session cookie's claims (ADR-0005). The display name is the session's
+/// captured display claim; the subject is the stable identity key.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UserInfoResponse {
+    pub subject: String,
+    pub display_name: String,
+    pub email: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct ConfigFile {
     #[serde(rename = "sharedRoot")]
@@ -89,6 +103,8 @@ struct ConfigFile {
     listen_port: Option<u16>,
     #[serde(rename = "oidc")]
     oidc: Option<OidcConfigFile>,
+    #[serde(rename = "access")]
+    access: Option<access::AccessConfigFile>,
 }
 
 /// Parse-time shape of the nested `oidc` block. Kept optional inside
@@ -139,6 +155,7 @@ struct AppConfig {
     listen_address: String,
     listen_port: u16,
     oidc: Option<AuthOidcConfig>,
+    access: Option<access::AccessConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -267,6 +284,10 @@ fn load_app_config(config_path: &Path) -> Result<AppConfig, String> {
     }
 
     let oidc = parsed.oidc.map(validate_oidc_config).transpose()?;
+    let access = parsed
+        .access
+        .map(access::validate_access_config)
+        .transpose()?;
 
     Ok(AppConfig {
         shared_root: canonical_root,
@@ -274,6 +295,7 @@ fn load_app_config(config_path: &Path) -> Result<AppConfig, String> {
         listen_address,
         listen_port: parsed.listen_port.unwrap_or(8080),
         oidc,
+        access,
     })
 }
 
@@ -411,6 +433,22 @@ pub fn get_oidc_config() -> Option<&'static AuthOidcConfig> {
     CONFIG.get().and_then(|config| config.oidc.as_ref())
 }
 
+/// Read access to the validated access config for the access gate middleware
+/// and the data handlers (backend/src/access.rs). None when the application
+/// config was not initialized or has no `access` block; the missing-block
+/// startup validation lives in `access::initialize_access` so test configs
+/// without the block can still parse.
+pub fn get_access_state_config() -> Option<&'static access::AccessConfig> {
+    CONFIG.get().and_then(|config| config.access.as_ref())
+}
+
+/// Read access to the canonical shared root for the access check mode (the
+/// walk needs the real structure). None when the application config was not
+/// initialized.
+pub fn get_shared_root() -> Option<&'static std::path::Path> {
+    CONFIG.get().map(|config| config.shared_root.as_path())
+}
+
 fn validate_relative_path(input: &str) -> Result<String, ApiError> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
@@ -496,7 +534,7 @@ fn percent_encode_entry_name(raw: &OsStr) -> String {
 
 /// Percent-decodes one string into raw bytes. Malformed escapes (`%` not followed by
 /// two hex digits) are passed through literally, matching the WHATWG decode behavior.
-fn percent_decode_bytes(input: &str) -> Vec<u8> {
+pub(crate) fn percent_decode_bytes(input: &str) -> Vec<u8> {
     let bytes = input.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
     let mut index = 0;
@@ -837,6 +875,61 @@ fn percent_encode_ext_value(name: &str) -> String {
     encoded
 }
 
+/// The `users/me` response, as a pure function of the identity extension so
+/// the response shape is testable without the process-global auth state: a
+/// valid session always carries the claims the gate verified; the test-only
+/// Disabled state reaches the handler without claims and fails closed.
+fn users_me_response(claims: Option<&SessionClaims>) -> Response {
+    let Some(claims) = claims else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(PublicErrorResponse {
+                message: "Authentication is unavailable.".to_string(),
+            }),
+        )
+            .into_response();
+    };
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-store"),
+    );
+    let display_name = if claims.display_name.is_empty() {
+        claims.subject.clone()
+    } else {
+        claims.display_name.clone()
+    };
+    let email = if claims.email.is_empty() {
+        None
+    } else {
+        Some(claims.email.clone())
+    };
+    (
+        StatusCode::OK,
+        headers,
+        Json(UserInfoResponse {
+            subject: claims.subject.clone(),
+            display_name,
+            email,
+        }),
+    )
+        .into_response()
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/users/me",
+    operation_id = "getApiV1UsersMe",
+    responses(
+        (status = 200, description = "Authenticated user identity", body = UserInfoResponse),
+        (status = 401, description = "Authentication required", body = PublicErrorResponse),
+        (status = 503, description = "Authentication unavailable", body = PublicErrorResponse)
+    )
+)]
+async fn users_me(identity: Option<Extension<SessionClaims>>) -> Response {
+    users_me_response(identity.as_deref())
+}
+
 #[utoipa::path(
     get,
     path = "/api/v1/health",
@@ -862,7 +955,10 @@ async fn health() -> Json<HealthResponse> {
         (status = 503, description = "Storage unavailable", body = PublicErrorResponse)
     )
 )]
-async fn directory(Query(query): Query<PathQuery>) -> Result<Response, ApiError> {
+async fn directory(
+    Query(query): Query<PathQuery>,
+    access_context: Option<Extension<access::AccessContext>>,
+) -> Result<Response, ApiError> {
     let config = get_app_config()?;
     let relative = validate_relative_path(&query.p)?;
 
@@ -893,6 +989,23 @@ async fn directory(Query(query): Query<PathQuery>) -> Result<Response, ApiError>
         let name = percent_encode_entry_name(&item.file_name());
         if !config.show_hidden && name.starts_with('.') {
             continue;
+        }
+
+        // The access filter (ADR-0005): a child entry is visible only when
+        // its path is inside the visible root. The context the gate stored
+        // carries the groups and the config, so the handler never consults
+        // the global config independently and the listing and the download
+        // paths cannot drift. The evaluated name is the API-rendered name
+        // (the names the config and the URLs address).
+        if let Some(context) = access_context.as_ref() {
+            let child = if relative.is_empty() {
+                name.clone()
+            } else {
+                format!("{relative}/{name}")
+            };
+            if !access::is_path_visible(context.access(), &context.groups, &child) {
+                continue;
+            }
         }
 
         let item_path = item.path();
@@ -1085,6 +1198,65 @@ async fn download(
     }
 }
 
+/// The data-endpoint paths the access gate middleware evaluates (ADR-0005).
+const DIRECTORY_PATH: &str = "/api/v1/directory";
+const DOWNLOAD_PATH: &str = "/api/v1/download";
+
+/// The access gate: evaluates the access decision for the request path once,
+/// after the auth gate verified the session (the chain is access_gate inside
+/// auth_gate, so the identity extension is already present), and stores the
+/// access context in request extensions for the handlers (ADR-0005 decision
+/// 7). Only the two data endpoints are evaluated; every other path has no
+/// filesystem semantics. A hidden request path answers 404 with the same
+/// message the handler's own not-found uses, so hidden and nonexistent are
+/// indistinguishable and no existence leaks. The test-only Disabled auth
+/// state reaches this middleware without an identity extension: no
+/// enforcement applies and the pre-access behavior is preserved.
+async fn access_gate(mut req: Request, next: Next) -> Response {
+    let path = req.uri().path().to_string();
+    if path != DIRECTORY_PATH && path != DOWNLOAD_PATH {
+        return next.run(req).await;
+    }
+    let Some(claims) = req.extensions().get::<SessionClaims>().cloned() else {
+        return next.run(req).await;
+    };
+    let Some(access) = access::get_access_config() else {
+        // Unreachable in production (the startup initializer aborts without
+        // the access block); the Disabled test state is the only None case.
+        return next.run(req).await;
+    };
+    let query = req.uri().query().unwrap_or_default();
+    let requested = url::form_urlencoded::parse(query.as_bytes())
+        .find(|(name, _)| name == "p")
+        .map(|(_, value)| value.into_owned())
+        .unwrap_or_default();
+    // A path the handler's validation would refuse (backslash, `..`, NUL) is
+    // not evaluated here: the handler answers 400, and the access rules are
+    // written against valid relative paths only.
+    let Ok(normalized) = validate_relative_path(&requested) else {
+        return next.run(req).await;
+    };
+    if !access::is_path_visible(access, &claims.groups, &normalized) {
+        let message = if path == DOWNLOAD_PATH {
+            "The requested file could not be found."
+        } else {
+            "The requested directory could not be found."
+        };
+        return (
+            StatusCode::NOT_FOUND,
+            Json(PublicErrorResponse {
+                message: message.to_string(),
+            }),
+        )
+            .into_response();
+    }
+    // The handlers read the access context from here instead of consulting
+    // the global config independently, so the evaluation cannot drift.
+    req.extensions_mut()
+        .insert(access::AccessContext::new(access, claims.groups));
+    next.run(req).await
+}
+
 fn embedded_asset_response(path: &str) -> Option<Response> {
     let file = FrontendAssets::get(path)?;
     let content_type = mime_guess::from_path(path).first_or_octet_stream();
@@ -1134,6 +1306,7 @@ async fn frontend_asset(OriginalUri(uri): OriginalUri) -> Response {
 pub fn app_router() -> Router {
     Router::new()
         .route("/api/v1/health", get(health))
+        .route("/api/v1/users/me", get(users_me))
         .route("/api/v1/directory", get(directory))
         .route("/api/v1/download", get(download))
         // The three auth endpoints the gate exempts: paths shared with
@@ -1142,20 +1315,27 @@ pub fn app_router() -> Router {
         .route(crate::auth::CALLBACK_PATH, get(crate::auth::callback))
         .route(crate::auth::LOGOUT_PATH, get(crate::auth::logout))
         .fallback(get(frontend_asset))
-        // The gate is applied AFTER the routes + fallback (Router::layer only
-        // applies to routes registered before the call) and BEFORE TraceLayer in
-        // the chain: chained layers run bottom-to-top, so TraceLayer (the last
-        // layer added) receives the request first — the span is created before
-        // the gate runs and 401/302 rejections are logged.
+        // The access gate is the innermost middleware: chained layers run
+        // bottom-to-top, so the request flows TraceLayer → auth_gate →
+        // access_gate → routes, and the identity extension the auth gate
+        // inserts is already present when the access decision is evaluated.
+        .layer(axum::middleware::from_fn(access_gate))
+        // The auth gate is applied AFTER the routes + fallback (Router::layer
+        // only applies to routes registered before the call) and BEFORE
+        // TraceLayer in the chain: chained layers run bottom-to-top, so
+        // TraceLayer (the last layer added) receives the request first — the
+        // span is created before the gate runs and 401/302 rejections are
+        // logged.
         .layer(axum::middleware::from_fn(crate::auth::auth_gate))
         .layer(TraceLayer::new_for_http())
 }
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(health, directory, download),
+    paths(health, users_me, directory, download),
     components(schemas(
         HealthResponse,
+        UserInfoResponse,
         PublicErrorResponse,
         EntryKind,
         DirectoryEntry,
@@ -1180,8 +1360,23 @@ mod tests {
         etag_matches_weakly, if_none_match_matches, load_app_config, modified_to_iso,
         open_download_target, parse_config_file, parse_single_byte_range,
         percent_decode_relative_path, percent_encode_entry_name, percent_encode_ext_value,
-        validate_relative_path,
+        users_me_response, validate_relative_path,
     };
+
+    /// The users/me response is a pure function of the identity extension: a
+    /// valid session carries the claims the gate verified, the test-only
+    /// Disabled state reaches the handler without claims and fails closed,
+    /// and an absent email claim renders as null.
+    #[test]
+    fn users_me_response_serves_the_identity_claims() {
+        let claims = crate::auth::session_claims_for_tests();
+        let response = users_me_response(Some(&claims));
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // The Disabled test state: no identity extension, fail closed.
+        let response = users_me_response(None);
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
 
     #[test]
     fn missing_shared_root_names_the_directory_and_the_fix() {

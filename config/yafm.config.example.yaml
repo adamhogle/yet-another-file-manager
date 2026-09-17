@@ -6,6 +6,34 @@ showHidden: false
 listenAddress: 0.0.0.0
 listenPort: 8080
 
+# Access control (ADR-0005). Required: the backend refuses to start without
+# it. A user's visible root is the union of the global allow list and the
+# allow entries of their authentik groups (from the ID token's groups claim,
+# filtered to the names below), minus every matching deny. Order does not
+# matter; denied means nothing underneath it is accessible. Allows are plain
+# paths ("/" is the root itself); deny patterns use gitignore glob semantics
+# (`*` within a segment, `?` one character, `**` across segments, a bare name
+# matches at any depth) and match files and directories. Verify the mapping
+# without serving traffic: backend --check-access --groups <comma-separated
+# groups> [config-path]
+access:
+  # Global baseline: every user sees this, regardless of groups.
+  allow: ['/common']
+  # Global deny: every user, everywhere.
+  deny: ['.env', '.git']
+  grants:
+    # Each grant maps an authentik group name to allow entries with optional
+    # paired allow-specific denies, scoped to that allow's path only.
+    yafm-tv:
+      allow:
+        - path: '/tv-shows'
+          deny: ['*.nfo']
+    yafm-devs:
+      allow:
+        - path: '/dev'
+          deny: ['dev/tmp/**']
+        - path: '/projects'
+
 # OIDC authentication (authentik). Required: the backend refuses to start
 # without it. Get the issuer from the provider's .well-known/openid-configuration
 # (default issuer mode is per-provider: .../application/o/<application slug>/).

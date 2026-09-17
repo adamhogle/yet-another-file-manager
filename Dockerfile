@@ -80,6 +80,24 @@ FROM base AS devcontainer
 
 WORKDIR /workspace
 
+# Headless browser system libraries: the repo's UI verification convention
+# (render and screenshot every affected width against real listing data) needs
+# a headless Firefox in the container. The browser binary itself is fetched at
+# provision time by the devcontainer.json postCreateCommand (kept out of the
+# image so CI's devcontainer build stays slim); these are the shared system
+# libraries it dlopens. libgtk-3-0 pulls the GTK stack (atk, cairo, pango,
+# gdk-pixbuf, the X client libraries, xcb, dbus, fontconfig, freetype, glib);
+# libasound2 and libxcb-shm0 are dlopened separately; fonts-liberation keeps
+# screenshot text readable. The runtime stage builds from
+# debian:bookworm-slim and never sees these.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    sudo \
+    libgtk-3-0 \
+    libasound2 \
+    libxcb-shm0 \
+    fonts-liberation \
+    && rm -rf /var/lib/apt/lists/*
+
 # Belt-and-braces: keep the toolchain dirs writable by the devcontainer user
 # (remoteUser: node) so an in-place rustup toolchain install or update works
 # even if the baked pin ever drifts. The runtime stage is built from
