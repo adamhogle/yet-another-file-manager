@@ -485,6 +485,13 @@ h1 {
   padding-top: 0.8rem;
 }
 
+/* The heading's top margin from the plain-error style would double-count
+   the flex container's padding and shift the text off the icon's center
+   line, so it resets here. */
+.error-heading h2 {
+  margin: 0;
+}
+
 .error-icon {
   width: 1.05rem;
   height: 1.05rem;
