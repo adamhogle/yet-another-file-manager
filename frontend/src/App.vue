@@ -89,6 +89,12 @@ function openDirectory(path: string): void {
   loadDirectory(path, true);
 }
 
+// Recovery from the error state: go back to the root, which replaces the
+// stale path in the URL so a reload does not land in the error again.
+function goToRoot(): void {
+  loadDirectory('', true);
+}
+
 onMounted(() => {
   loadDirectory(readPathFromUrl(), false);
   window.addEventListener('popstate', () => {
@@ -121,7 +127,7 @@ onMounted(() => {
       </nav>
     </header>
 
-    <section v-if="noAccess" class="panel error-panel">
+    <section v-if="noAccess" class="panel notice-panel">
       <h2>No visible files</h2>
       <p>
         No folders are shared with your account. Ask the operator to add your groups to the access
@@ -129,9 +135,19 @@ onMounted(() => {
       </p>
     </section>
 
-    <section v-else-if="errorMessage" class="panel error-panel">
-      <h2>Directory unavailable</h2>
+    <section v-else-if="errorMessage" class="panel error-panel" role="alert">
+      <div class="error-heading">
+        <svg class="error-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path
+            d="M12 2a10 10 0 1 1 0 20 10 10 0 0 1 0-20Zm0 2a8 8 0 1 0 0 16 8 8 0 0 0 0-16Zm0 10.9c.55 0 1 .45 1 1s-.45 1-1 1-1-.45-1-1 .45-1 1-1Zm0-8.9c.55 0 1 .45 1 1v5c0 .55-.45 1-1 1s-1-.45-1-1V7c0-.55.45-1 1-1Z"
+          />
+        </svg>
+        <h2>Directory unavailable</h2>
+      </div>
       <p>{{ errorMessage }}</p>
+      <p class="error-actions">
+        <button type="button" class="error-recover" @click="goToRoot">Back to root</button>
+      </p>
     </section>
 
     <template v-else>
@@ -438,15 +454,72 @@ h1 {
 }
 
 .empty-state,
-.error-panel p {
+.error-panel p,
+.notice-panel p {
   padding: 0.8rem;
   margin: 0;
   font-size: 0.88rem;
 }
 
+.notice-panel h2 {
+  font-size: 0.95rem;
+  margin: 0.8rem 0 0;
+}
+
+/* The error panel reads as an error: a red accent stripe, an icon beside the
+   heading, and a recovery action instead of a bare message. */
+.error-panel {
+  border-left: 0.22rem solid #c23b32;
+}
+
 .error-panel h2 {
   font-size: 0.95rem;
   margin: 0.8rem 0 0;
+}
+
+.error-heading {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding-inline: 0.8rem;
+  padding-top: 0.8rem;
+}
+
+/* The heading's top margin from the plain-error style would double-count
+   the flex container's padding and shift the text off the icon's center
+   line, so it resets here. */
+.error-heading h2 {
+  margin: 0;
+}
+
+.error-icon {
+  width: 1.05rem;
+  height: 1.05rem;
+  flex-shrink: 0;
+  fill: #c23b32;
+}
+
+/* Scoped under .error-panel so the reset outranks the .error-panel p
+   rule (class + element beats the bare class in the cascade). */
+.error-panel .error-actions {
+  padding: 0.8rem;
+  padding-top: 0;
+}
+
+.error-recover {
+  border: 1px solid #c23b32;
+  border-radius: 0.35rem;
+  background: #ffffff;
+  padding: 0.35rem 0.75rem;
+  color: #c23b32;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.error-recover:hover,
+.error-recover:focus-visible {
+  background: #c23b32;
+  color: #ffffff;
 }
 
 @media (max-width: 640px) {
