@@ -262,14 +262,25 @@ async fn the_listing_reports_can_delete_per_entry() {
     let response = request(&app, "GET", "/api/v1/directory?p=dev", Some(&cookie)).await;
     assert_eq!(response.status(), StatusCode::OK);
     let body = body_string(response).await;
-    // main.rs (a regular file covered by the delete-enabled grant) is
-    // deletable; main.rs.link (a symlink) is not.
-    assert!(
-        body.contains("\"canDelete\":true"),
-        "the listing must report canDelete true for a deletable file: {body}"
-    );
-    assert!(
-        body.contains("\"canDelete\":false"),
-        "the listing must report canDelete false for a non-deletable entry: {body}"
-    );
+    let parsed: serde_json::Value = serde_json::from_str(&body).expect("the listing carries JSON");
+    // The listing classifies an entry by its target's type (canonicalize
+    // plus metadata), so the symlink-to-file row renders as a file whose
+    // delete answers 400, the accepted edge case ADR-0006 documents. The
+    // non-deletable value here comes from the tmp directory, never from
+    // the symlink.
+    let entry = |name: &str| {
+        parsed["entries"]
+            .as_array()
+            .expect("the listing carries entries")
+            .iter()
+            .find(|item| item["name"] == name)
+            .unwrap_or_else(|| panic!("the listing is missing {name}: {body}"))
+            .clone()
+    };
+    assert_eq!(entry("main.rs")["kind"], "file");
+    assert_eq!(entry("main.rs")["canDelete"], true);
+    assert_eq!(entry("main.rs.link")["kind"], "file");
+    assert_eq!(entry("main.rs.link")["canDelete"], true);
+    assert_eq!(entry("tmp")["kind"], "directory");
+    assert_eq!(entry("tmp")["canDelete"], false);
 }

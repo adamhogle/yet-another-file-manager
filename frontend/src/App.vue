@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, nextTick, onMounted, ref } from 'vue';
 import {
   ApiHttpError,
   buildDownloadHref,
@@ -98,9 +98,19 @@ function openDirectory(path: string): void {
 // confirmation there. Deletion is permanent, so the request is sent only
 // after the second click.
 const confirmingDelete = ref('');
+// The confirm button of the confirming row. Only one row confirms at a
+// time, so a function ref bound to the confirm-delete button holds the
+// single rendered instance; the swap removes the focused trash button
+// from the DOM, and focus moves to the confirmation control.
+const confirmButton = ref<HTMLButtonElement | null>(null);
+
+function setConfirmButton(element: unknown): void {
+  confirmButton.value = element instanceof HTMLButtonElement ? element : null;
+}
 
 function startDeleteConfirmation(entryName: string): void {
   confirmingDelete.value = entryName;
+  void nextTick(() => confirmButton.value?.focus());
 }
 
 function cancelDeleteConfirmation(): void {
@@ -269,7 +279,12 @@ onMounted(() => {
                   </svg>
                 </button>
                 <template v-else>
-                  <button type="button" class="confirm-delete" @click="confirmDelete(entry)">
+                  <button
+                    :ref="setConfirmButton"
+                    type="button"
+                    class="confirm-delete"
+                    @click="confirmDelete(entry)"
+                  >
                     Delete?
                   </button>
                   <button type="button" class="cancel-delete" @click="cancelDeleteConfirmation">
