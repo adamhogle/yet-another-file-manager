@@ -14,7 +14,11 @@ paths = [
 # Test fixtures that deliberately look like secrets but are not. The signing
 # key below is a self-documenting placeholder used by the config-parser unit
 # tests (see backend/src/lib.rs and config/yafm.config.example.yaml).
+# The generated client function names are not secrets either; gitleaks'
+# generic-api-key heuristic misreads the last line of a multi-line import
+# against the module path as an API key assignment.
 regexes = [
   '''replace-signing-key-0123456789abcdef''',
-  '''replace-me'''
+  '''replace-me''',
+  '''getApiV1[A-Za-z]+'''
 ]

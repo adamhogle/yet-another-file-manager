@@ -1014,10 +1014,10 @@ async fn directory(
         // carries the groups and the config, so the handler never consults
         // the global config independently and the listing and the download
         // paths cannot drift.
-        if let Some(context) = access_context.as_ref() {
-            if !access::is_path_visible(context.access(), &context.groups, &child) {
-                continue;
-            }
+        if let Some(context) = access_context.as_ref()
+            && !access::is_path_visible(context.access(), &context.groups, &child)
+        {
+            continue;
         }
 
         let item_path = item.path();
