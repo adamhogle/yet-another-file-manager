@@ -19,6 +19,7 @@ export const EntryKindSchema = z.enum(['directory', 'file']);
 export type EntryKind = z.infer<typeof EntryKindSchema>;
 
 export const DirectoryEntrySchema = z.object({
+  canDelete: z.boolean(),
   kind: EntryKindSchema,
   modifiedAt: z.string().nullable().optional(),
   name: z.string(),
@@ -136,6 +137,47 @@ export async function getApiV1Download(
   }
 
   return response.blob();
+}
+
+export async function deleteApiV1File(
+  baseUrl: string = DEFAULT_BASE_URL,
+  query: Record<string, string | number | boolean | null | undefined> = {},
+  init: RequestInit = {}
+): Promise<void> {
+  const searchParams = new URLSearchParams();
+  for (const [key, value] of Object.entries(query)) {
+    if (value === undefined || value === null || value === '') {
+      continue;
+    }
+
+    searchParams.set(key, String(value));
+  }
+
+  const queryString = searchParams.toString();
+  const response = await fetch(`${baseUrl}/api/v1/file${queryString ? `?${queryString}` : ''}`, {
+    ...init,
+    method: 'DELETE',
+    headers: {
+      ...(init.headers ?? {})
+    }
+  });
+
+  if (!response.ok) {
+    let message = `Request failed: DELETE /api/v1/file -> ${response.status}`;
+    try {
+      const body = PublicErrorResponseSchema.parse(await response.json());
+      if (body.message) {
+        message = body.message;
+      }
+    } catch {
+      // Non-JSON or non-conforming body: keep the fallback message.
+    }
+    // The HTTP status rides the error so callers can distinguish failure
+    // classes (the backend's 404 for hidden paths vs other errors). The
+    // message alone carries the backend's PublicErrorResponse text, which is
+    // deliberately shared between hidden and nonexistent paths.
+    throw new ApiHttpError(message, response.status);
+  }
 }
 
 export async function getApiV1Health(

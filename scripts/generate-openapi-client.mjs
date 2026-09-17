@@ -71,6 +71,10 @@ function renderBaseType(node) {
     return `z.array(${renderBaseType(node.items ?? {})})`;
   }
 
+  if (type === 'boolean') {
+    return 'z.boolean()';
+  }
+
   if (type === 'object') {
     const required = new Set(Array.isArray(node.required) ? node.required : []);
     const properties = Object.entries(node.properties ?? {}).map(([propertyName, propertyNode]) => {

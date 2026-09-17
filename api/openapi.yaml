@@ -85,6 +85,44 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/PublicErrorResponse'
+  /api/v1/file:
+    delete:
+      tags: []
+      operationId: deleteApiV1File
+      parameters:
+        - name: p
+          in: query
+          description: Relative file path under shared root
+          required: false
+          schema:
+            type: string
+      responses:
+        '204':
+          description: File deleted
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublicErrorResponse'
+        '403':
+          description: File not deletable for this user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublicErrorResponse'
+        '404':
+          description: File not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublicErrorResponse'
+        '503':
+          description: Storage unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublicErrorResponse'
   /api/v1/health:
     get:
       tags: []
@@ -126,7 +164,10 @@ components:
       required:
         - name
         - kind
+        - canDelete
       properties:
+        canDelete:
+          type: boolean
         kind:
           $ref: '#/components/schemas/EntryKind'
         modifiedAt:
