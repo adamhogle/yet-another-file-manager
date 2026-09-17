@@ -1142,7 +1142,9 @@ async fn delete_file(
     .await?;
     ensure_within_root(&config.shared_root, &parent_canonical)?;
     if !parent_canonical.is_dir() {
-        return Err(ApiError::not_found("The requested file could not be found."));
+        return Err(ApiError::not_found(
+            "The requested file could not be found.",
+        ));
     }
 
     // The literal form first: the target is the name the listing rendered,
@@ -1156,18 +1158,23 @@ async fn delete_file(
             // the decoded bytes.
             let decoded_name = percent_decode_relative_path(&name)?;
             let decoded_target = parent_canonical.join(&decoded_name);
-            let decoded_meta = tokio::fs::symlink_metadata(&decoded_target)
-                .await
-                .map_err(|error| {
-                    if error.kind() == ErrorKind::NotFound {
-                        ApiError::not_found("The requested file could not be found.")
-                    } else {
-                        ApiError::unavailable("The shared directory is unavailable.")
-                    }
-                })?;
+            let decoded_meta =
+                tokio::fs::symlink_metadata(&decoded_target)
+                    .await
+                    .map_err(|error| {
+                        if error.kind() == ErrorKind::NotFound {
+                            ApiError::not_found("The requested file could not be found.")
+                        } else {
+                            ApiError::unavailable("The shared directory is unavailable.")
+                        }
+                    })?;
             (decoded_target, decoded_meta)
         }
-        Err(_) => return Err(ApiError::unavailable("The shared directory is unavailable.")),
+        Err(_) => {
+            return Err(ApiError::unavailable(
+                "The shared directory is unavailable.",
+            ));
+        }
     };
     // symlink_metadata classifies the entry itself: only regular files are
     // deleted, directories and symlinks are refused.
@@ -1177,22 +1184,20 @@ async fn delete_file(
         ));
     }
 
-    tokio::fs::remove_file(&target)
-        .await
-        .map_err(|error| {
-            if error.kind() == ErrorKind::NotFound {
-                // A concurrent delete removed the file first.
-                ApiError::not_found("The requested file could not be found.")
-            } else if error.kind() == ErrorKind::PermissionDenied {
-                // The fail-closed signal for a read-only mount: name the
-                // unwritable directory so the operator can fix the mount.
-                ApiError::unavailable(
-                    "The shared directory is not writable; file deletion requires a writable mount.",
-                )
-            } else {
-                ApiError::unavailable("The shared directory is unavailable.")
-            }
-        })?;
+    tokio::fs::remove_file(&target).await.map_err(|error| {
+        if error.kind() == ErrorKind::NotFound {
+            // A concurrent delete removed the file first.
+            ApiError::not_found("The requested file could not be found.")
+        } else if error.kind() == ErrorKind::PermissionDenied {
+            // The fail-closed signal for a read-only mount: name the
+            // unwritable directory so the operator can fix the mount.
+            ApiError::unavailable(
+                "The shared directory is not writable; file deletion requires a writable mount.",
+            )
+        } else {
+            ApiError::unavailable("The shared directory is unavailable.")
+        }
+    })?;
 
     Ok(StatusCode::NO_CONTENT.into_response())
 }
