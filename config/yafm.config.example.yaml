@@ -2,7 +2,7 @@
 # npm run dev resolves this as backend/../dev-data/share = dev-data/share.
 sharedRoot: ../dev-data/share
 showHidden: false
-# listing filter only — not an access control; hidden files are still downloadable by name
+# listing filter only; not an access control: hidden files are still downloadable by name
 listenAddress: 0.0.0.0
 listenPort: 8080
 

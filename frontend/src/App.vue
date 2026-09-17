@@ -61,6 +61,9 @@ async function loadDirectory(path: string, updateHistory = true): Promise<void> 
 
   try {
     const listing = await fetchDirectory(path);
+    // A navigation replaces the entries, so any confirmation armed on a
+    // same-named row in the previous directory must not survive it.
+    confirmingDelete.value = '';
     currentPath.value = listing.currentPath;
     entries.value = listing.entries;
 
