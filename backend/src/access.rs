@@ -674,15 +674,15 @@ pub async fn run_access_check(
         // is used when its coverage covers one, a deny rule when its pattern
         // matches one.
         for rule in rules.iter_mut() {
-            if let Some(allow_path) = &rule.allow_path {
-                if allow_covers(allow_path, &segments) {
-                    rule.used = true;
-                }
+            if let Some(allow_path) = &rule.allow_path
+                && allow_covers(allow_path, &segments)
+            {
+                rule.used = true;
             }
-            if let Some(pattern) = &rule.deny {
-                if pattern.matches(&segments) {
-                    rule.used = true;
-                }
+            if let Some(pattern) = &rule.deny
+                && pattern.matches(&segments)
+            {
+                rule.used = true;
             }
         }
         report.push_str(&verdict_line(&relative, &decision));
@@ -721,15 +721,15 @@ pub async fn run_access_check(
             let child_decision = evaluate(access, groups, &child_segments);
             // Child paths are evaluated too, so their rule usage counts.
             for rule in rules.iter_mut() {
-                if let Some(allow_path) = &rule.allow_path {
-                    if allow_covers(allow_path, &child_segments) {
-                        rule.used = true;
-                    }
+                if let Some(allow_path) = &rule.allow_path
+                    && allow_covers(allow_path, &child_segments)
+                {
+                    rule.used = true;
                 }
-                if let Some(pattern) = &rule.deny {
-                    if pattern.matches(&child_segments) {
-                        rule.used = true;
-                    }
+                if let Some(pattern) = &rule.deny
+                    && pattern.matches(&child_segments)
+                {
+                    rule.used = true;
                 }
             }
             let is_dir = item.file_type().await.map(|t| t.is_dir()).unwrap_or(false);
