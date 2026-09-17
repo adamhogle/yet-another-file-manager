@@ -161,8 +161,8 @@ pub const LOGIN_MAX_AGE_SECONDS: u64 = 10 * 60;
 /// The cookie-size budget the callback warns against: browsers cap a cookie
 /// at ~4 KB and silently drop oversized Set-Cookie values, so an identity
 /// payload with many groups can produce a login that looks like a bug. The
-/// number is the commonly-quoted 4093-byte per-cookie cap (name=value
-/// included).
+/// number is the commonly-quoted 4093-byte per-cookie cap, measured on the
+/// name=value pair (attributes are not part of the browser limit).
 const SESSION_COOKIE_BUDGET_BYTES: usize = 4093;
 
 /// The three auth endpoint paths, exempt from the gate so the login flow can
@@ -1040,7 +1040,9 @@ async fn callback_response(
     // values: a login that looks like a bug. The budget check logs a warning
     // for operators instead of letting the drop happen unnoticed; the
     // practical limit is documented in the config example and ADR-0005.
-    if minted.encoded().to_string().len() > SESSION_COOKIE_BUDGET_BYTES {
+    // The budget is measured on the name=value pair: browsers cap that part,
+    // not the Set-Cookie attributes.
+    if minted.encoded().stripped().to_string().len() > SESSION_COOKIE_BUDGET_BYTES {
         tracing::warn!(
             "The session cookie for subject {} exceeds the {}-byte cookie budget; the browser may silently drop it. Reduce the user's authentik group memberships or shorten group names.",
             claims.subject,

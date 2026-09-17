@@ -163,9 +163,10 @@ Trade-offs:
 - Group changes take effect at the next login, not mid-session (documented
   staleness).
 - The claims ride the signed cookie; browsers cap a cookie at ~4 KB and silently
-  drop oversized values. The callback validates the claims fit the budget and logs a
-  warning; the practical limit is documented in the config example. Authentik group
-  names are short in practice.
+  drop oversized values. The callback validates the claims fit the budget on the
+  name=value pair (the browser limit applies to that part, not the Set-Cookie
+  attributes) and logs a warning; the practical limit is documented in the config
+  example. Authentik group names are short in practice.
 - Denies scattered across grants need the check mode to audit; the global deny list
   centralizes shared exclusions.
 - The `access` block is required, so an upgrade without it aborts startup with a

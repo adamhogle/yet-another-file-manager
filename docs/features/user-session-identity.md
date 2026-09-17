@@ -111,9 +111,10 @@ contract:check`).
   probe-on-error behavior described in `docs/features/oidc-authentication.md`),
   extended to redirect to login with the current path as `returnTo`.
 - Cookie size: browsers cap a cookie at ~4 KB and silently drop oversized Set-Cookie
-  values. The callback validates that the claims fit the budget and logs a warning
-  when a user's claims exceed it; the practical limit is documented in the config
-  example and ADR-0005.
+  values. The callback validates that the claims fit the budget (measured on the
+  name=value pair, since the browser limit applies to that part and not the
+  Set-Cookie attributes) and logs a warning when a user's claims exceed it; the
+  practical limit is documented in the config example and ADR-0005.
 
 ## Security Considerations
 
