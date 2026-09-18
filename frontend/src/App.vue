@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, nextTick, onMounted, ref } from 'vue';
 import {
   ApiHttpError,
   buildDownloadHref,
+  deleteFile,
   fetchDirectory,
   fetchIdentity,
   toChildPath
@@ -60,6 +61,9 @@ async function loadDirectory(path: string, updateHistory = true): Promise<void> 
 
   try {
     const listing = await fetchDirectory(path);
+    // A navigation replaces the entries, so any confirmation armed on a
+    // same-named row in the previous directory must not survive it.
+    confirmingDelete.value = '';
     currentPath.value = listing.currentPath;
     entries.value = listing.entries;
 
@@ -87,6 +91,51 @@ async function loadDirectory(path: string, updateHistory = true): Promise<void> 
 
 function openDirectory(path: string): void {
   loadDirectory(path, true);
+}
+
+// The entry currently showing its inline delete confirmation. Only one row
+// confirms at a time; clicking another row's delete action moves the
+// confirmation there. Deletion is permanent, so the request is sent only
+// after the second click.
+const confirmingDelete = ref('');
+// The confirm button of the confirming row. Only one row confirms at a
+// time, so a function ref bound to the confirm-delete button holds the
+// single rendered instance; the swap removes the focused trash button
+// from the DOM, and focus moves to the confirmation control.
+const confirmButton = ref<HTMLButtonElement | null>(null);
+
+function setConfirmButton(element: unknown): void {
+  confirmButton.value = element instanceof HTMLButtonElement ? element : null;
+}
+
+function startDeleteConfirmation(entryName: string): void {
+  confirmingDelete.value = entryName;
+  void nextTick(() => confirmButton.value?.focus());
+}
+
+function cancelDeleteConfirmation(): void {
+  confirmingDelete.value = '';
+}
+
+async function confirmDelete(entry: DirectoryEntry): Promise<void> {
+  confirmingDelete.value = '';
+  try {
+    await deleteFile(currentPath.value, entry.name);
+  } catch (error) {
+    const status = error instanceof ApiHttpError ? error.status : undefined;
+    if (status === 404) {
+      // The file is already gone (a concurrent delete): reload the listing
+      // so it reflects the filesystem, without surfacing an error.
+      await loadDirectory(currentPath.value, false);
+      return;
+    }
+    errorMessage.value =
+      error instanceof Error ? error.message : 'The shared directory is unavailable.';
+    return;
+  }
+  // Deleted: reload so the listing reflects the filesystem. updateHistory is
+  // false because the path is unchanged.
+  await loadDirectory(currentPath.value, false);
 }
 
 // Recovery from the error state: go back to the root, which replaces the
@@ -184,6 +233,7 @@ onMounted(() => {
             v-for="entry in entries"
             :key="`${entry.kind}:${entry.name}`"
             class="details-row"
+            :class="{ 'is-confirming': confirmingDelete === entry.name }"
             role="row"
           >
             <div class="name-cell" role="cell">
@@ -213,6 +263,35 @@ onMounted(() => {
                   />
                 </svg>
               </a>
+              <template v-if="entry.kind === 'file' && entry.canDelete">
+                <button
+                  v-if="confirmingDelete !== entry.name"
+                  type="button"
+                  class="icon-action delete-action"
+                  :aria-label="`Delete ${entry.name}`"
+                  title="Delete"
+                  @click="startDeleteConfirmation(entry.name)"
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                    <path
+                      d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"
+                    />
+                  </svg>
+                </button>
+                <template v-else>
+                  <button
+                    :ref="setConfirmButton"
+                    type="button"
+                    class="confirm-delete"
+                    @click="confirmDelete(entry)"
+                  >
+                    Delete?
+                  </button>
+                  <button type="button" class="cancel-delete" @click="cancelDeleteConfirmation">
+                    No
+                  </button>
+                </template>
+              </template>
             </span>
           </div>
         </div>
@@ -451,6 +530,55 @@ h1 {
   width: 0.92rem;
   height: 0.92rem;
   fill: currentColor;
+}
+
+/* The delete action reads as destructive: a red accent instead of the blue
+   link accent the download action carries. */
+.delete-action {
+  color: #c23b32;
+  border-color: #e8c9c4;
+}
+
+/* The inline confirmation needs two buttons; the actions track is one icon
+   wide otherwise. A confirming row widens the track so the buttons fit
+   without pushing the other columns out of the panel. Phone widths stack
+   the columns instead and size the actions area to its content, so this
+   override only applies above the stack breakpoint. */
+@media (min-width: 641px) {
+  .details-row.is-confirming {
+    grid-template-columns: minmax(8rem, 1fr) 9rem 11.5rem auto;
+  }
+}
+
+.confirm-delete,
+.cancel-delete {
+  border-radius: 0.3rem;
+  font-size: 0.75rem;
+  padding: 0.2rem 0.45rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.confirm-delete {
+  border: 1px solid #c23b32;
+  background: #ffffff;
+  color: #c23b32;
+}
+
+.confirm-delete:hover,
+.confirm-delete:focus-visible {
+  background: #c23b32;
+  color: #ffffff;
+}
+
+.cancel-delete {
+  border: 1px solid #d8e2ee;
+  background: #f7fafc;
+  color: #243242;
+}
+
+.cancel-delete:hover {
+  background: #eef4fa;
 }
 
 .empty-state,

@@ -1,4 +1,4 @@
-import { getApiV1Directory, getApiV1UsersMe } from './generated/client';
+import { deleteApiV1File, getApiV1Directory, getApiV1UsersMe } from './generated/client';
 import type { DirectoryListing, UserInfoResponse } from './generated/client';
 
 const DEFAULT_BASE_URL = '';
@@ -23,6 +23,35 @@ export function buildDownloadHref(
 ): string {
   const params = new URLSearchParams({ p: toChildPath(currentPath, fileName) });
   return `${baseUrl}/api/v1/download?${params.toString()}`;
+}
+
+// The delete request uses the DELETE method, which is not a CORS simple
+// request: a cross-origin attacker would need a preflight the backend never
+// approves, and the session cookie is SameSite=Lax so a cross-site fetch does
+// not carry it. A 401 means the session was rejected mid-action, so the
+// wrapper sends the browser through the OIDC login like the other data
+// fetches.
+export async function deleteFile(
+  currentPath: string,
+  fileName: string,
+  baseUrl: string = DEFAULT_BASE_URL
+): Promise<void> {
+  try {
+    await deleteApiV1File(
+      baseUrl,
+      { p: toChildPath(currentPath, fileName) },
+      {
+        headers: {
+          Accept: 'application/json'
+        }
+      }
+    );
+  } catch (error) {
+    if (await isUnauthenticated()) {
+      return redirectToLogin();
+    }
+    throw error;
+  }
 }
 
 // The gate rejected the session: send the browser through the OIDC login

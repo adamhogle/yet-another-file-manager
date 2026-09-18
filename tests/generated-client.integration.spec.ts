@@ -8,7 +8,11 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { getApiV1Directory, getApiV1Health } from '../frontend/src/lib/api/generated/client';
+import {
+  deleteApiV1File,
+  getApiV1Directory,
+  getApiV1Health
+} from '../frontend/src/lib/api/generated/client';
 
 const repoRoot = process.cwd();
 const READINESS_BUDGET_MS = 150_000;
@@ -182,6 +186,20 @@ describe.skipIf(!hasFrontendDist)('generated client integration', () => {
   it('surfaces backend validation errors for invalid paths', async () => {
     await expect(getApiV1Directory(baseUrl, { p: '../secret' })).rejects.toThrow(
       'The requested directory could not be found.'
+    );
+  });
+
+  it('deletes a file from the live backend and the listing reflects it', async () => {
+    // The spec runs in the Disabled test state (no access block), where the
+    // delete endpoint allows deletion and the listing reports every file
+    // deletable.
+    await writeFile(path.join(tempDirectory, 'share', 'projects', 'delete-me.txt'), 'temporary');
+
+    await deleteApiV1File(baseUrl, { p: 'projects/delete-me.txt' });
+
+    const listing = await getApiV1Directory(baseUrl, { p: 'projects' });
+    expect(listing.entries).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: 'delete-me.txt' })])
     );
   });
 });

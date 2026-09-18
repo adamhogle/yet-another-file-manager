@@ -16,6 +16,8 @@ A web-based file manager for self-hosted local file sharing, built with a Rust b
 
 - Rust backend with the Vue frontend embedded in the binary.
 - Directory listing and streaming downloads with Range and ETag support.
+- Group-scoped file deletion: a per-group all-or-nothing grant that deletes
+  visible regular files, with an inline confirmation in the UI.
 - Path traversal and symlink escape protection, verified by tests.
 - OIDC authentication (authentik tested) with signed session cookies applied
   to every route, including static assets.
@@ -145,6 +147,13 @@ logout navigates to `GET /api/v1/auth/logout`. The access rules limit what each 
 group can see (see the `access` config field above); a user with no allow entries at all
 sees an explicit no-access state. The design is recorded in
 `docs/architecture/0005-group-based-access-control.md`.
+
+Deletion is granted per group with the `delete` field on a grant (see the `access`
+config field above): a group with `delete: true` can delete any regular file visible
+via that grant's own allow entries, behind an inline confirmation. The global
+baseline is never deletable, and a hidden file answers 404 like a nonexistent one.
+Deleting requires a writable shared root for the delete-allowed directories. The
+design is recorded in `docs/architecture/0006-group-scoped-file-deletion.md`.
 
 ## Scripts
 

@@ -2,7 +2,7 @@
 # npm run dev resolves this as backend/../dev-data/share = dev-data/share.
 sharedRoot: ../dev-data/share
 showHidden: false
-# listing filter only — not an access control; hidden files are still downloadable by name
+# listing filter only; not an access control: hidden files are still downloadable by name
 listenAddress: 0.0.0.0
 listenPort: 8080
 
@@ -13,9 +13,12 @@ listenPort: 8080
 # matter; denied means nothing underneath it is accessible. Allows are plain
 # paths ("/" is the root itself); deny patterns use gitignore glob semantics
 # (`*` within a segment, `?` one character, `**` across segments, a bare name
-# matches at any depth) and match files and directories. Verify the mapping
-# without serving traffic: backend --check-access --groups <comma-separated
-# groups> [config-path]
+# matches at any depth) and match files and directories. Deletion (ADR-0006)
+# is granted per group, all or nothing, and only reaches files visible via
+# that group's own allow entries: the global baseline is never deletable.
+# Deleting requires a writable shared root for the delete-allowed
+# directories. Verify the mapping without serving traffic: backend
+# --check-access --groups <comma-separated groups> [config-path]
 access:
   # Global baseline: every user sees this, regardless of groups.
   allow: ['/common']
@@ -29,6 +32,8 @@ access:
         - path: '/tv-shows'
           deny: ['*.nfo']
     yafm-devs:
+      # All-or-nothing delete capability for this group (ADR-0006).
+      delete: true
       allow:
         - path: '/dev'
           deny: ['dev/tmp/**']

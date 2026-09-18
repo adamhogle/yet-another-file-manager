@@ -13,7 +13,7 @@ use axum::extract::{Extension, OriginalUri, Query, Request};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{delete, get};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use once_cell::sync::OnceCell;
@@ -68,6 +68,7 @@ pub enum EntryKind {
 pub struct DirectoryEntry {
     pub name: String,
     pub kind: EntryKind,
+    pub can_delete: bool,
     pub size_bytes: Option<u64>,
     pub modified_at: Option<String>,
 }
@@ -168,6 +169,7 @@ struct PathQuery {
 enum ApiErrorKind {
     BadRequest,
     NotFound,
+    Forbidden,
     Unavailable,
 }
 
@@ -192,6 +194,13 @@ impl ApiError {
         }
     }
 
+    fn forbidden(message: &str) -> Self {
+        Self {
+            kind: ApiErrorKind::Forbidden,
+            message: message.to_string(),
+        }
+    }
+
     fn unavailable(message: &str) -> Self {
         Self {
             kind: ApiErrorKind::Unavailable,
@@ -203,6 +212,7 @@ impl ApiError {
         match self.kind {
             ApiErrorKind::BadRequest => StatusCode::BAD_REQUEST,
             ApiErrorKind::NotFound => StatusCode::NOT_FOUND,
+            ApiErrorKind::Forbidden => StatusCode::FORBIDDEN,
             ApiErrorKind::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
         }
     }
@@ -477,6 +487,44 @@ fn validate_relative_path(input: &str) -> Result<String, ApiError> {
     Ok(parts.join("/"))
 }
 
+/// Maps a filesystem error onto the API shapes: a NotFound becomes the
+/// caller's not-found message, anything else is the shared 503. The
+/// PermissionDenied arm on removal is delete-specific and stays at that
+/// call site, so the shared mapping cannot drift from the handlers and the
+/// removal path cannot disagree about the fail-closed signal.
+fn not_found_or_unavailable(error: &std::io::Error, not_found_message: &str) -> ApiError {
+    if error.kind() == ErrorKind::NotFound {
+        ApiError::not_found(not_found_message)
+    } else {
+        ApiError::unavailable("The shared directory is unavailable.")
+    }
+}
+
+/// Resolves the metadata of an entry inside an already-resolved parent,
+/// trying the literal name first and falling back to the percent-decoded
+/// bytes: entries whose names are not valid UTF-8 are listed percent-encoded
+/// and must be re-opened through the decoded bytes. Classification is the
+/// caller's job; `symlink_metadata` does not follow symlinks.
+async fn entry_metadata(
+    parent: &Path,
+    name: &str,
+    not_found_message: &str,
+) -> Result<(PathBuf, std::fs::Metadata), ApiError> {
+    let literal_target = parent.join(name);
+    match tokio::fs::symlink_metadata(&literal_target).await {
+        Ok(meta) => Ok((literal_target, meta)),
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            let decoded_name = percent_decode_relative_path(name)?;
+            let decoded_target = parent.join(&decoded_name);
+            let meta = tokio::fs::symlink_metadata(&decoded_target)
+                .await
+                .map_err(|error| not_found_or_unavailable(&error, not_found_message))?;
+            Ok((decoded_target, meta))
+        }
+        Err(error) => Err(not_found_or_unavailable(&error, not_found_message)),
+    }
+}
+
 fn ensure_within_root(root: &Path, candidate: &Path) -> Result<(), ApiError> {
     if candidate == root || candidate.starts_with(root) {
         Ok(())
@@ -600,17 +648,9 @@ async fn canonical_entry_target(
             let decoded = percent_decode_relative_path(relative)?;
             tokio::fs::canonicalize(root.join(decoded))
                 .await
-                .map_err(|error| {
-                    if error.kind() == ErrorKind::NotFound {
-                        ApiError::not_found(not_found_message)
-                    } else {
-                        ApiError::unavailable("The shared directory is unavailable.")
-                    }
-                })
+                .map_err(|error| not_found_or_unavailable(&error, not_found_message))
         }
-        Err(_) => Err(ApiError::unavailable(
-            "The shared directory is unavailable.",
-        )),
+        Err(error) => Err(not_found_or_unavailable(&error, not_found_message)),
     }
 }
 
@@ -991,21 +1031,23 @@ async fn directory(
             continue;
         }
 
+        // The evaluated child path: the API-rendered name (the names the
+        // config and the URLs address).
+        let child = if relative.is_empty() {
+            name.clone()
+        } else {
+            format!("{relative}/{name}")
+        };
+
         // The access filter (ADR-0005): a child entry is visible only when
         // its path is inside the visible root. The context the gate stored
         // carries the groups and the config, so the handler never consults
         // the global config independently and the listing and the download
-        // paths cannot drift. The evaluated name is the API-rendered name
-        // (the names the config and the URLs address).
-        if let Some(context) = access_context.as_ref() {
-            let child = if relative.is_empty() {
-                name.clone()
-            } else {
-                format!("{relative}/{name}")
-            };
-            if !access::is_path_visible(context.access(), &context.groups, &child) {
-                continue;
-            }
+        // paths cannot drift.
+        if let Some(context) = access_context.as_ref()
+            && !access::is_path_visible(context.access(), &context.groups, &child)
+        {
+            continue;
         }
 
         let item_path = item.path();
@@ -1028,9 +1070,24 @@ async fn directory(
             EntryKind::Directory => None,
         };
 
+        // The delete capability (ADR-0006): a file entry is deletable when a
+        // delete-enabled grant's allow covers its path, using the same
+        // evaluation source as the visibility filter so the listing and the
+        // delete endpoint cannot drift. Directories are never deletable. The
+        // Disabled test state (no access context) reports every file
+        // deletable, mirroring the unfiltered pre-access listing.
+        let deletable = match kind {
+            EntryKind::File => match access_context.as_ref() {
+                Some(context) => access::can_delete(context.access(), &context.groups, &child),
+                None => true,
+            },
+            EntryKind::Directory => false,
+        };
+
         entries.push(DirectoryEntry {
             name,
             kind,
+            can_delete: deletable,
             size_bytes,
             modified_at: modified_to_iso(&meta),
         });
@@ -1053,6 +1110,113 @@ async fn directory(
         entries,
     });
     Ok((StatusCode::OK, headers, json).into_response())
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/v1/file",
+    operation_id = "deleteApiV1File",
+    params(("p" = Option<String>, Query, description = "Relative file path under shared root")),
+    responses(
+        (status = 204, description = "File deleted"),
+        (status = 400, description = "Invalid request", body = PublicErrorResponse),
+        (status = 403, description = "File not deletable for this user", body = PublicErrorResponse),
+        (status = 404, description = "File not found", body = PublicErrorResponse),
+        (status = 503, description = "Storage unavailable", body = PublicErrorResponse)
+    )
+)]
+async fn delete_file(
+    Query(query): Query<PathQuery>,
+    access_context: Option<Extension<access::AccessContext>>,
+) -> Result<Response, ApiError> {
+    let config = get_app_config()?;
+    let relative = validate_relative_path(&query.p).map_err(|error| match error.kind {
+        // A `..` probe surfaces the shared validator's ParentDir arm; the
+        // file endpoint keeps the single hidden/nonexistent message shape
+        // the delete contract pins.
+        ApiErrorKind::NotFound => ApiError::not_found("The requested file could not be found."),
+        _ => error,
+    })?;
+    if relative.is_empty() {
+        return Err(ApiError::bad_request("The requested path is invalid."));
+    }
+
+    // The Disabled test state reaches the handler without an access context:
+    // no enforcement applies and the pre-access behavior (no access control)
+    // is preserved. Production always has the access block.
+    if let Some(context) = access_context.as_ref() {
+        // Hidden paths answer 404 like nonexistent paths: no existence leak.
+        if !access::is_path_visible(context.access(), &context.groups, &relative) {
+            return Err(ApiError::not_found(
+                "The requested file could not be found.",
+            ));
+        }
+        // A visible file the user may not delete: 403. The user can already
+        // see the file (the listing shows it), so this leaks nothing new.
+        if !access::can_delete(context.access(), &context.groups, &relative) {
+            return Err(ApiError::forbidden(
+                "The requested file cannot be deleted with this account.",
+            ));
+        }
+    }
+
+    // Symlink-safe target resolution: the parent directory is canonicalized
+    // and verified to be within the shared root, and the final name (a
+    // single validated segment) is appended after that resolution, so a
+    // symlinked parent cannot escape the root. The entry is classified with
+    // symlink_metadata (no symlink following), so remove_file cannot reach
+    // outside the root and only regular files are deleted.
+    let (parent, name) = relative
+        .rsplit_once('/')
+        .map(|(parent, name)| (parent.to_string(), name.to_string()))
+        .unwrap_or_else(|| (String::new(), relative.clone()));
+    let parent_canonical = canonical_entry_target(
+        &config.shared_root,
+        &parent,
+        "The requested file could not be found.",
+    )
+    .await?;
+    ensure_within_root(&config.shared_root, &parent_canonical)?;
+    if !parent_canonical.is_dir() {
+        return Err(ApiError::not_found(
+            "The requested file could not be found.",
+        ));
+    }
+
+    // The literal form first: the target is the name the listing rendered,
+    // which may itself contain `%` sequences that must not be decoded. The
+    // shared resolution falls back to the percent-decoded bytes and keeps
+    // the decode-and-revalidate discipline in one place.
+    let (target, meta) = entry_metadata(
+        &parent_canonical,
+        &name,
+        "The requested file could not be found.",
+    )
+    .await?;
+    // symlink_metadata classifies the entry itself: only regular files are
+    // deleted, directories and symlinks are refused.
+    if !meta.is_file() {
+        return Err(ApiError::bad_request(
+            "Only regular files can be deleted; directories and symlinks are refused.",
+        ));
+    }
+
+    tokio::fs::remove_file(&target).await.map_err(|error| {
+        if error.kind() == ErrorKind::PermissionDenied {
+            // The fail-closed signal for a read-only mount. The message is a
+            // fixed string that names no host path: naming the directory
+            // would leak it, and the operator knows the shared root from
+            // config.
+            ApiError::unavailable(
+                "The shared directory is not writable; file deletion requires a writable mount.",
+            )
+        } else {
+            // A concurrent delete removed the file first.
+            not_found_or_unavailable(&error, "The requested file could not be found.")
+        }
+    })?;
+
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 #[utoipa::path(
@@ -1201,12 +1365,13 @@ async fn download(
 /// The data-endpoint paths the access gate middleware evaluates (ADR-0005).
 const DIRECTORY_PATH: &str = "/api/v1/directory";
 const DOWNLOAD_PATH: &str = "/api/v1/download";
+const FILE_PATH: &str = "/api/v1/file";
 
 /// The access gate: evaluates the access decision for the request path once,
 /// after the auth gate verified the session (the chain is access_gate inside
 /// auth_gate, so the identity extension is already present), and stores the
 /// access context in request extensions for the handlers (ADR-0005 decision
-/// 7). Only the two data endpoints are evaluated; every other path has no
+/// 7). Only the data endpoints are evaluated; every other path has no
 /// filesystem semantics. A hidden request path answers 404 with the same
 /// message the handler's own not-found uses, so hidden and nonexistent are
 /// indistinguishable and no existence leaks. The test-only Disabled auth
@@ -1214,7 +1379,7 @@ const DOWNLOAD_PATH: &str = "/api/v1/download";
 /// enforcement applies and the pre-access behavior is preserved.
 async fn access_gate(mut req: Request, next: Next) -> Response {
     let path = req.uri().path().to_string();
-    if path != DIRECTORY_PATH && path != DOWNLOAD_PATH {
+    if path != DIRECTORY_PATH && path != DOWNLOAD_PATH && path != FILE_PATH {
         return next.run(req).await;
     }
     let Some(claims) = req.extensions().get::<SessionClaims>().cloned() else {
@@ -1237,10 +1402,10 @@ async fn access_gate(mut req: Request, next: Next) -> Response {
         return next.run(req).await;
     };
     if !access::is_path_visible(access, &claims.groups, &normalized) {
-        let message = if path == DOWNLOAD_PATH {
-            "The requested file could not be found."
-        } else {
+        let message = if path == DIRECTORY_PATH {
             "The requested directory could not be found."
+        } else {
+            "The requested file could not be found."
         };
         return (
             StatusCode::NOT_FOUND,
@@ -1309,6 +1474,7 @@ pub fn app_router() -> Router {
         .route("/api/v1/users/me", get(users_me))
         .route("/api/v1/directory", get(directory))
         .route("/api/v1/download", get(download))
+        .route("/api/v1/file", delete(delete_file))
         // The three auth endpoints the gate exempts: paths shared with
         // is_public_path so the exemption and the routes stay in sync.
         .route(crate::auth::LOGIN_PATH, get(crate::auth::login))
@@ -1332,7 +1498,7 @@ pub fn app_router() -> Router {
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(health, users_me, directory, download),
+    paths(health, users_me, directory, download, delete_file),
     components(schemas(
         HealthResponse,
         UserInfoResponse,

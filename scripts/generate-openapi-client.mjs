@@ -71,6 +71,10 @@ function renderBaseType(node) {
     return `z.array(${renderBaseType(node.items ?? {})})`;
   }
 
+  if (type === 'boolean') {
+    return 'z.boolean()';
+  }
+
   if (type === 'object') {
     const required = new Set(Array.isArray(node.required) ? node.required : []);
     const properties = Object.entries(node.properties ?? {}).map(([propertyName, propertyNode]) => {
@@ -206,15 +210,24 @@ function renderOperation(method, rawPath, operation) {
     (_, name) => `\${encodeURIComponent(params.${name})}`
   );
   const hasPathParams = /\{(\w+)\}/.test(rawPath);
-  const responseSchema = resolveResponseSchema(operation, method, rawPath);
+  // A 204 No Content response carries no body: the generated function
+  // returns void instead of parsing or wrapping a blob. A 200 response
+  // keeps the existing schema-or-blob shape.
+  const isNoContent = !operation.responses?.['200'] && Boolean(operation.responses?.['204']);
+  const responseSchema = isNoContent ? null : resolveResponseSchema(operation, method, rawPath);
   const queryType = 'Record<string, string | number | boolean | null | undefined>';
   const signature = hasPathParams
     ? `baseUrl: string = DEFAULT_BASE_URL, params: Record<string, string | number | boolean> = {}, query: ${queryType} = {}, init: RequestInit = {}`
     : `baseUrl: string = DEFAULT_BASE_URL, query: ${queryType} = {}, init: RequestInit = {}`;
-  const typeName = responseSchema ?? 'Blob';
-  const successReturn = responseSchema
-    ? `return ${responseSchema}Schema.parse(await response.json());`
-    : 'return response.blob();';
+  let typeName = 'Blob';
+  let successReturn = 'return response.blob();';
+  if (isNoContent) {
+    typeName = 'void';
+    successReturn = '';
+  } else if (responseSchema) {
+    typeName = responseSchema;
+    successReturn = `return ${responseSchema}Schema.parse(await response.json());`;
+  }
 
   return `export async function ${functionName}(${signature}): Promise<${typeName}> {
   const searchParams = new URLSearchParams();

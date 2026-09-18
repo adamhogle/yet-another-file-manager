@@ -1,0 +1,6 @@
+# Known gitleaks false positives, suppressed by fingerprint (one per line).
+#
+# The generated client's multi-line import block: gitleaks' generic-api-key
+# heuristic misreads the last import item against the module path
+# (.../lib/api/generated/client) as an API key assignment.
+4eac3f2f44e3e5190277cd8e1752e0644d05360c:tests/generated-client.integration.spec.ts:generic-api-key:13

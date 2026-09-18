@@ -26,10 +26,11 @@ pub struct AccessConfig {
     global_allow: Vec<String>,
     /// Deny patterns applying to every user and every allow path.
     global_deny: Vec<DenyPattern>,
-    /// Grants mapping a configured authentik group to its allow entries. The
-    /// user's groups claim is filtered to these names; a group in the claim
-    /// that the config does not name is ignored entirely.
-    grants: BTreeMap<String, Vec<AllowEntry>>,
+    /// Grants mapping a configured authentik group to its delete capability
+    /// and allow entries. The user's groups claim is filtered to these names;
+    /// a group in the claim that the config does not name is ignored
+    /// entirely.
+    grants: BTreeMap<String, Grant>,
 }
 
 /// One allow entry inside a grant: the allowed directory path plus the
@@ -45,6 +46,17 @@ pub struct AllowEntry {
     deny: Vec<DenyPattern>,
 }
 
+/// One validated grant: the group's all-or-nothing delete capability plus
+/// its allow entries.
+#[derive(Debug, Clone)]
+pub struct Grant {
+    /// Whether members of this group may delete visible files (ADR-0006).
+    /// All or nothing: no per-path delete rules exist. Files visible only
+    /// through the global baseline are never deletable.
+    delete: bool,
+    allow: Vec<AllowEntry>,
+}
+
 /// Parse-time shape of the `access` block. Kept optional inside the config
 /// file shape so test configs without the block can still parse; the
 /// startup-abort decision for a missing block lives in `initialize_access`.
@@ -58,10 +70,13 @@ pub struct AccessConfigFile {
     grants: BTreeMap<String, GrantFile>,
 }
 
-/// Parse-time shape of one grant: the group's allow entries, each with an
-/// optional paired allow-specific deny list.
+/// Parse-time shape of one grant: the group's all-or-nothing delete
+/// capability plus its allow entries, each with an optional paired
+/// allow-specific deny list.
 #[derive(Debug, Deserialize)]
 pub struct GrantFile {
+    #[serde(rename = "delete", default)]
+    delete: bool,
     #[serde(rename = "allow", default)]
     allow: Vec<AllowEntryFile>,
 }
@@ -227,7 +242,13 @@ pub fn validate_access_config(block: AccessConfigFile) -> Result<AccessConfig, S
                 "Configuration access grants \"{group_name}\" must list at least one allow entry."
             ));
         }
-        grants.insert(group_name, entries);
+        grants.insert(
+            group_name,
+            Grant {
+                delete: grant.delete,
+                allow: entries,
+            },
+        );
     }
 
     Ok(AccessConfig {
@@ -483,7 +504,7 @@ pub fn evaluate(access: &AccessConfig, groups: &[String], segments: &[&str]) -> 
             || access
                 .grants
                 .iter()
-                .any(|(group, entries)| groups.contains(group) && !entries.is_empty());
+                .any(|(group, grant)| groups.contains(group) && !grant.allow.is_empty());
         return if has_allow {
             AccessDecision::Visible {
                 allow_source: "allow entries exist for the scenario's groups".to_string(),
@@ -504,11 +525,11 @@ pub fn evaluate(access: &AccessConfig, groups: &[String], segments: &[&str]) -> 
             covered_by_global = true;
         }
     }
-    for (group, entries) in &access.grants {
+    for (group, grant) in &access.grants {
         if !groups.contains(group) {
             continue;
         }
-        for entry in entries {
+        for entry in &grant.allow {
             if allow_covers(&entry.path, segments) {
                 covering.push((group.as_str(), entry));
             }
@@ -557,6 +578,29 @@ pub fn evaluate(access: &AccessConfig, groups: &[String], segments: &[&str]) -> 
         )
     };
     AccessDecision::Visible { allow_source }
+}
+
+/// The delete authorization check (ADR-0006): a user may delete a file if
+/// and only if the file is visible to them under the existing allow/deny
+/// evaluation, and an allow entry of one of their groups that has
+/// `delete: true` covers the file. Deny rules still win: a file hidden by
+/// the global deny or by any allow-specific deny is not deletable even when
+/// a delete-enabled grant's allow covers it. Files visible only through the
+/// global allow baseline are never deletable, since only grant allow
+/// entries count. The root itself is not a file.
+pub fn can_delete(access: &AccessConfig, groups: &[String], relative: &str) -> bool {
+    if relative.is_empty() || !is_path_visible(access, groups, relative) {
+        return false;
+    }
+    let segments = path_segments(relative);
+    access.grants.iter().any(|(group, grant)| {
+        groups.contains(group)
+            && grant.delete
+            && grant
+                .allow
+                .iter()
+                .any(|entry| allow_covers(&entry.path, &segments))
+    })
 }
 
 /// The normalized relative path segments of a validated relative path.
@@ -832,7 +876,7 @@ fn check_rules(access: &AccessConfig) -> Vec<CheckRule> {
         });
     }
     for (group, grant) in &access.grants {
-        for entry in grant {
+        for entry in &grant.allow {
             rules.push(CheckRule {
                 label: format!("allow \"/{}\" (grant {group})", entry.path),
                 allow_path: Some(entry.path.clone()),
@@ -871,23 +915,29 @@ mod tests {
             grants: BTreeMap::from([
                 (
                     "yafm-tv".to_string(),
-                    vec![AllowEntry {
-                        path: "tv-shows".to_string(),
-                        deny: deny_patterns(&["*.nfo"]),
-                    }],
+                    Grant {
+                        delete: false,
+                        allow: vec![AllowEntry {
+                            path: "tv-shows".to_string(),
+                            deny: deny_patterns(&["*.nfo"]),
+                        }],
+                    },
                 ),
                 (
                     "yafm-devs".to_string(),
-                    vec![
-                        AllowEntry {
-                            path: "dev".to_string(),
-                            deny: deny_patterns(&["dev/tmp/**"]),
-                        },
-                        AllowEntry {
-                            path: "projects".to_string(),
-                            deny: Vec::new(),
-                        },
-                    ],
+                    Grant {
+                        delete: false,
+                        allow: vec![
+                            AllowEntry {
+                                path: "dev".to_string(),
+                                deny: deny_patterns(&["dev/tmp/**"]),
+                            },
+                            AllowEntry {
+                                path: "projects".to_string(),
+                                deny: Vec::new(),
+                            },
+                        ],
+                    },
                 ),
             ]),
         }
@@ -902,6 +952,84 @@ mod tests {
     fn visible(config: &AccessConfig, groups: &[&str], relative: &str) -> bool {
         let groups: Vec<String> = groups.iter().map(|g| g.to_string()).collect();
         is_path_visible(config, &groups, relative)
+    }
+
+    /// A config with a delete-enabled grant scoped to `/dev` and a grant
+    /// without delete scoped to `/tv-shows`.
+    fn delete_config() -> AccessConfig {
+        AccessConfig {
+            global_allow: vec!["common".to_string()],
+            global_deny: deny_patterns(&[".env"]),
+            grants: BTreeMap::from([
+                (
+                    "yafm-devs".to_string(),
+                    Grant {
+                        delete: true,
+                        allow: vec![AllowEntry {
+                            path: "dev".to_string(),
+                            deny: Vec::new(),
+                        }],
+                    },
+                ),
+                (
+                    "yafm-tv".to_string(),
+                    Grant {
+                        delete: false,
+                        allow: vec![AllowEntry {
+                            path: "tv-shows".to_string(),
+                            deny: Vec::new(),
+                        }],
+                    },
+                ),
+            ]),
+        }
+    }
+
+    #[test]
+    fn can_delete_requires_a_delete_enabled_grant_whose_allow_covers_the_path() {
+        let config = delete_config();
+        let groups: Vec<String> = vec!["yafm-devs".to_string(), "yafm-tv".to_string()];
+
+        // A delete-enabled grant's allow covers the path: deletable.
+        assert!(can_delete(&config, &groups, "dev/main.rs"));
+        // A visible file covered only by a grant without delete: not deletable.
+        assert!(!can_delete(&config, &groups, "tv-shows/show.mkv"));
+        // The global baseline is never deletable: only grant allow entries count.
+        assert!(!can_delete(&config, &groups, "common/README.md"));
+    }
+
+    #[test]
+    fn can_delete_follows_the_deny_rules_and_refuses_the_root() {
+        let config = AccessConfig {
+            global_allow: vec![],
+            global_deny: deny_patterns(&[".env"]),
+            grants: BTreeMap::from([(
+                "yafm-devs".to_string(),
+                Grant {
+                    delete: true,
+                    allow: vec![AllowEntry {
+                        path: "dev".to_string(),
+                        deny: deny_patterns(&["dev/tmp/**"]),
+                    }],
+                },
+            )]),
+        };
+        let groups: Vec<String> = vec!["yafm-devs".to_string()];
+
+        assert!(can_delete(&config, &groups, "dev/main.rs"));
+        // A deny always wins: the global deny hides .env and the
+        // allow-specific deny hides dev/tmp, so neither is deletable even
+        // though a delete-enabled grant's allow covers both.
+        assert!(!can_delete(&config, &groups, "dev/.env"));
+        assert!(!can_delete(&config, &groups, "dev/tmp/scratch.txt"));
+        // The root itself is not a file.
+        assert!(!can_delete(&config, &groups, ""));
+        // A group the config does not name carries no delete for the user.
+        assert!(!can_delete(
+            &config,
+            &["yafm-other".to_string()],
+            "dev/main.rs"
+        ));
     }
 
     #[test]
@@ -1015,17 +1143,23 @@ mod tests {
             grants: BTreeMap::from([
                 (
                     "a".to_string(),
-                    vec![AllowEntry {
-                        path: "shared".to_string(),
-                        deny: deny_patterns(&["*.nfo"]),
-                    }],
+                    Grant {
+                        delete: false,
+                        allow: vec![AllowEntry {
+                            path: "shared".to_string(),
+                            deny: deny_patterns(&["*.nfo"]),
+                        }],
+                    },
                 ),
                 (
                     "b".to_string(),
-                    vec![AllowEntry {
-                        path: "shared".to_string(),
-                        deny: Vec::new(),
-                    }],
+                    Grant {
+                        delete: false,
+                        allow: vec![AllowEntry {
+                            path: "shared".to_string(),
+                            deny: Vec::new(),
+                        }],
+                    },
                 ),
             ]),
         };
@@ -1166,7 +1300,13 @@ mod tests {
         let block = AccessConfigFile {
             allow: Vec::new(),
             deny: Vec::new(),
-            grants: BTreeMap::from([("yafm-tv".to_string(), GrantFile { allow: Vec::new() })]),
+            grants: BTreeMap::from([(
+                "yafm-tv".to_string(),
+                GrantFile {
+                    delete: false,
+                    allow: Vec::new(),
+                },
+            )]),
         };
         let error = validate_access_config(block).expect_err("an empty grant must be refused");
         assert!(error.contains("at least one allow entry"));
@@ -1294,10 +1434,13 @@ mod tests {
             global_deny: deny_patterns(&[".env", "stale/**"]),
             grants: BTreeMap::from([(
                 "yafm-devs".to_string(),
-                vec![AllowEntry {
-                    path: validate_allow_path("/missing").expect("the allow path"),
-                    deny: Vec::new(),
-                }],
+                Grant {
+                    delete: false,
+                    allow: vec![AllowEntry {
+                        path: validate_allow_path("/missing").expect("the allow path"),
+                        deny: Vec::new(),
+                    }],
+                },
             )]),
         };
         let report = run_access_check(&root, &config, &["yafm-devs".to_string()])
