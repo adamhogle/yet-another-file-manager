@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 import {
   ApiHttpError,
   buildDownloadHref,
@@ -61,9 +61,9 @@ async function loadDirectory(path: string, updateHistory = true): Promise<void> 
 
   try {
     const listing = await fetchDirectory(path);
-    // A navigation replaces the entries, so any confirmation armed on a
+    // A navigation replaces the entries, so a confirmation armed on a
     // same-named row in the previous directory must not survive it.
-    confirmingDelete.value = '';
+    deleteDialog.value?.close();
     currentPath.value = listing.currentPath;
     entries.value = listing.entries;
 
@@ -97,28 +97,46 @@ function openDirectory(path: string): void {
 // confirms at a time; clicking another row's delete action moves the
 // confirmation there. Deletion is permanent, so the request is sent only
 // after the second click.
-const confirmingDelete = ref('');
-// The confirm button of the confirming row. Only one row confirms at a
-// time, so a function ref bound to the confirm-delete button holds the
-// single rendered instance; the swap removes the focused trash button
-// from the DOM, and focus moves to the confirmation control.
-const confirmButton = ref<HTMLButtonElement | null>(null);
+// The entry whose deletion awaits confirmation. The modal is a native
+// <dialog> element rendered at the page level; only one confirmation is
+// open at a time.
+const deleteTarget = ref<DirectoryEntry | null>(null);
+const deleteDialog = ref<HTMLDialogElement | null>(null);
 
-function setConfirmButton(element: unknown): void {
-  confirmButton.value = element instanceof HTMLButtonElement ? element : null;
+// The dialog is rendered only while a target is pending, so the function
+// ref is the point where the element exists: opening the modal here means
+// showModal() runs after the element is in the DOM.
+function onDeleteDialogMounted(element: unknown): void {
+  const dialog = element instanceof HTMLDialogElement ? element : null;
+  deleteDialog.value = dialog;
+  dialog?.showModal();
 }
 
-function startDeleteConfirmation(entryName: string): void {
-  confirmingDelete.value = entryName;
-  void nextTick(() => confirmButton.value?.focus());
+function startDeleteConfirmation(entry: DirectoryEntry): void {
+  deleteTarget.value = entry;
 }
 
-function cancelDeleteConfirmation(): void {
-  confirmingDelete.value = '';
+// The native dialog: Escape fires cancel (which closes the dialog and then
+// emits close), so the close event is the single point that clears the
+// target for both cancel paths.
+function onDeleteDialogClose(): void {
+  deleteTarget.value = null;
+}
+
+// A click on the dialog element itself is the backdrop: treat it as a
+// cancel, matching the Escape path.
+function onDeleteDialogClick(event: MouseEvent): void {
+  if (event.target === deleteDialog.value) {
+    deleteDialog.value?.close();
+  }
+}
+
+function cancelDelete(): void {
+  deleteDialog.value?.close();
 }
 
 async function confirmDelete(entry: DirectoryEntry): Promise<void> {
-  confirmingDelete.value = '';
+  deleteDialog.value?.close();
   try {
     await deleteFile(currentPath.value, entry.name);
   } catch (error) {
@@ -233,7 +251,6 @@ onMounted(() => {
             v-for="entry in entries"
             :key="`${entry.kind}:${entry.name}`"
             class="details-row"
-            :class="{ 'is-confirming': confirmingDelete === entry.name }"
             role="row"
           >
             <div class="name-cell" role="cell">
@@ -265,12 +282,11 @@ onMounted(() => {
               </a>
               <template v-if="entry.kind === 'file' && entry.canDelete">
                 <button
-                  v-if="confirmingDelete !== entry.name"
                   type="button"
                   class="icon-action delete-action"
                   :aria-label="`Delete ${entry.name}`"
                   title="Delete"
-                  @click="startDeleteConfirmation(entry.name)"
+                  @click="startDeleteConfirmation(entry)"
                 >
                   <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                     <path
@@ -278,25 +294,33 @@ onMounted(() => {
                     />
                   </svg>
                 </button>
-                <template v-else>
-                  <button
-                    :ref="setConfirmButton"
-                    type="button"
-                    class="confirm-delete"
-                    @click="confirmDelete(entry)"
-                  >
-                    Delete?
-                  </button>
-                  <button type="button" class="cancel-delete" @click="cancelDeleteConfirmation">
-                    No
-                  </button>
-                </template>
               </template>
             </span>
           </div>
         </div>
       </section>
     </template>
+
+    <!-- The delete confirmation: a native modal dialog. showModal() traps
+         focus inside, Escape closes it, and the close event is the single
+         point that clears the pending target for every cancel path. -->
+    <dialog
+      v-if="deleteTarget"
+      :ref="onDeleteDialogMounted"
+      class="delete-dialog"
+      :aria-labelledby="'delete-dialog-title'"
+      @close="onDeleteDialogClose"
+      @click="onDeleteDialogClick"
+    >
+      <h2 id="delete-dialog-title">Delete {{ deleteTarget.name }}?</h2>
+      <p>This permanently removes {{ deleteTarget.name }}. This cannot be undone.</p>
+      <div class="dialog-actions">
+        <button type="button" class="dialog-cancel" autofocus @click="cancelDelete">Cancel</button>
+        <button type="button" class="dialog-confirm" @click="confirmDelete(deleteTarget)">
+          Confirm
+        </button>
+      </div>
+    </dialog>
 
     <footer class="page-footer" aria-label="Project license and source">
       <small>
@@ -456,7 +480,10 @@ h1 {
 
 .details-row {
   display: grid;
-  grid-template-columns: minmax(16rem, 1fr) 9rem 11.5rem 3.2rem;
+  /* The actions track is fixed (not auto) so the header row and the body
+     rows, each an independent grid, align their last column. 3.5rem fits
+     the two 1.5rem icon buttons plus the 2px margin between them. */
+  grid-template-columns: minmax(16rem, 1fr) 9rem 11.5rem 3.5rem;
   column-gap: 0.8rem;
   align-items: center;
   min-height: 1.85rem;
@@ -533,52 +560,75 @@ h1 {
 }
 
 /* The delete action reads as destructive: a red accent instead of the blue
-   link accent the download action carries. */
+   link accent the download action carries. The inline margin keeps a
+   2px gap from the download button beside it, so the two actions do not
+   read as one control at the button size. */
 .delete-action {
   color: #c23b32;
   border-color: #e8c9c4;
+  margin-inline-start: 2px;
 }
 
-/* The inline confirmation needs two buttons; the actions track is one icon
-   wide otherwise. A confirming row widens the track so the buttons fit
-   without pushing the other columns out of the panel. Phone widths stack
-   the columns instead and size the actions area to its content, so this
-   override only applies above the stack breakpoint. */
-@media (min-width: 641px) {
-  .details-row.is-confirming {
-    grid-template-columns: minmax(8rem, 1fr) 9rem 11.5rem auto;
-  }
+/* The delete confirmation: a native modal dialog. The panel mirrors the
+   app's card look; the backdrop dims the page behind it. */
+.delete-dialog {
+  max-width: 26rem;
+  padding: 1.1rem 1.25rem;
+  border: 1px solid #d8e2ee;
+  border-radius: 0.45rem;
+  background: #ffffff;
+  color: #1f2833;
+  box-shadow: 0 0.6rem 1.5rem rgba(31, 40, 51, 0.25);
 }
 
-.confirm-delete,
-.cancel-delete {
+.delete-dialog::backdrop {
+  background: rgba(31, 40, 51, 0.4);
+}
+
+.delete-dialog h2 {
+  font-size: 1rem;
+  margin: 0 0 0.4rem;
+}
+
+.delete-dialog p {
+  font-size: 0.88rem;
+  margin: 0 0 0.9rem;
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
+.dialog-cancel,
+.dialog-confirm {
   border-radius: 0.3rem;
-  font-size: 0.75rem;
-  padding: 0.2rem 0.45rem;
+  font-size: 0.82rem;
+  padding: 0.35rem 0.8rem;
   cursor: pointer;
   white-space: nowrap;
 }
 
-.confirm-delete {
-  border: 1px solid #c23b32;
-  background: #ffffff;
-  color: #c23b32;
-}
-
-.confirm-delete:hover,
-.confirm-delete:focus-visible {
-  background: #c23b32;
-  color: #ffffff;
-}
-
-.cancel-delete {
+.dialog-cancel {
   border: 1px solid #d8e2ee;
   background: #f7fafc;
   color: #243242;
 }
 
-.cancel-delete:hover {
+.dialog-cancel:hover {
   background: #eef4fa;
+}
+
+.dialog-confirm {
+  border: 1px solid #c23b32;
+  background: #c23b32;
+  color: #ffffff;
+}
+
+.dialog-confirm:hover,
+.dialog-confirm:focus-visible {
+  background: #a8312a;
 }
 
 .empty-state,

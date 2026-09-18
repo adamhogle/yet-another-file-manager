@@ -34,9 +34,9 @@ As a member of a group with the delete grant, I want to delete a visible file fr
 
 ## UX / Flow
 
-1. The user opens a directory listing. File rows where `canDelete` is true show a delete action beside the download action.
-2. Clicking the delete action switches the row to an inline confirmation (Delete?, then No).
-3. Confirming sends the delete request. On 204 the listing reloads and the file is gone. On 404 the listing also reloads, since the file is already gone.
+1. The user opens a directory listing. File rows where `canDelete` is true show a delete action beside the download action, separated by a 2px inline margin so the two actions do not read as one control.
+2. Clicking the delete action opens a native modal `<dialog>`: the title names the file ("Delete <name>?"), the body states that the removal is permanent, and the buttons are Confirm and Cancel. `showModal()` traps focus inside, Escape closes, a backdrop click cancels, and focus lands on Cancel so Enter does not destroy.
+3. Confirming closes the dialog and sends the delete request. On 204 the listing reloads and the file is gone. On 404 the listing also reloads, since the file is already gone.
 4. Any other error (400, 403, 503) surfaces through the existing error panel without reloading.
 5. Directories never show a delete action.
 
@@ -68,7 +68,7 @@ As a member of a group with the delete grant, I want to delete a visible file fr
 - [x] Files visible only through the global allow baseline are not deletable by anyone.
 - [x] A file hidden by a deny rule answers 404 to a delete request, indistinguishable from nonexistent.
 - [x] Deleting a directory or a symlink target is refused with 400.
-- [x] The UI shows the delete action only on file rows where `canDelete` is true, behind an inline confirmation.
+- [x] The UI shows the delete action only on file rows where `canDelete` is true, behind a modal confirmation.
 - [x] A successful delete removes the file and the listing reflects it after reload.
 - [x] Errors do not reveal absolute host filesystem paths.
 
@@ -76,7 +76,7 @@ As a member of a group with the delete grant, I want to delete a visible file fr
 
 - Unit: `access::can_delete` semantics (grant coverage, baseline exclusion, deny wins, no permission), config validation of the `delete` flag, delete handler behavior (file only, hidden 404, 403, directory 400, symlink refusal, race 404), gate evaluation of the delete path.
 - Integration: delete against a live server with grants configured, including the generated-client integration spec.
-- End-to-end/manual: UI verified at 1440, 768, 390 and 320 px with full-page screenshots, delete action shown and hidden per row, confirmation step, post-delete refreshed listing.
+- End-to-end/manual: UI verified at 1440, 768, 390 and 320 px with full-page screenshots, delete action shown and hidden per row, the modal open with focus on Cancel and the gap between the two actions, post-delete refreshed listing.
 
 ## Open Questions
 
@@ -87,4 +87,9 @@ As a member of a group with the delete grant, I want to delete a visible file fr
 - The per-grant `delete` boolean defaults to false; only grant allow entries count, so the global baseline is never deletable.
 - `DELETE /api/v1/file` returns 204 on success, 400 for a non-regular-file target, 403 for a visible file the user may not delete, 404 for hidden paths, and 503 with the fixed unwritable-mount message when the shared root is read-only. The message names no host path.
 - Target resolution is symlink-safe: the parent directory is canonicalized and verified to be within the shared root, and the entry is classified with `symlink_metadata`, so `remove_file` never follows a symlink for the final component.
-- The generated client returns `Promise<void>` for the 204; the frontend shows the delete action behind a two-step inline confirmation.
+- The generated client returns `Promise<void>` for the 204; the frontend shows the delete action behind a native modal `<dialog>` with Confirm and Cancel, and the two row actions carry a 2px inline margin.
+
+## Revision History
+
+- 2026-09-17: accepted and implemented as the inline two-step row confirmation.
+- 2026-09-19: the confirmation became a native modal `<dialog>` (Confirm/Cancel) after deployment feedback: the inline row confirmation crammed three small controls into one cell, and the modal gives the decision its own space with labeled buttons, focus and an Escape path. The two row actions gained a 2px margin.

@@ -75,8 +75,9 @@ the one this decision changes.
    check would duplicate what the kernel already refuses.
 
 6. **The UI confirms before deleting.** File rows where `canDelete` is true show
-   a delete action; clicking it enters a two-step inline confirmation in the row
-   (no modal dependency). Confirming sends the delete request, reloads the
+   a delete action; clicking it opens a native modal `<dialog>` with Confirm and
+   Cancel (the browser's dialog element carries focus trapping and Escape
+   handling natively). Confirming sends the delete request, reloads the
    listing on 204, and reloads on 404 too since the file is already gone.
    Directories never show a delete action.
 
