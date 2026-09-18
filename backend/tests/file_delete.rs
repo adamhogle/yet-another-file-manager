@@ -254,6 +254,23 @@ async fn a_session_without_delete_permission_answers_403() {
 }
 
 #[tokio::test]
+async fn a_parent_dir_probe_answers_404_with_the_file_message() {
+    let _fixture = locked_fixture();
+    let app = access_router().await;
+    let cookie = minted_cookie(&["yafm-devs"]);
+
+    let response = request(&app, "DELETE", "/api/v1/file?p=..", Some(&cookie)).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    // The `..` probe surfaces the shared validator's ParentDir arm; the file
+    // endpoint keeps the single hidden/nonexistent message shape the delete
+    // contract pins.
+    assert_eq!(
+        body_string(response).await,
+        "{\"message\":\"The requested file could not be found.\"}"
+    );
+}
+
+#[tokio::test]
 async fn the_listing_reports_can_delete_per_entry() {
     let _fixture = locked_fixture();
     let app = access_router().await;

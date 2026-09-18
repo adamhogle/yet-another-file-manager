@@ -35,7 +35,7 @@ As a member of a group with the delete grant, I want to delete a visible file fr
 ## UX / Flow
 
 1. The user opens a directory listing. File rows where `canDelete` is true show a delete action beside the download action.
-2. Clicking the delete action switches the row to an inline confirmation (Delete? / Confirm, No).
+2. Clicking the delete action switches the row to an inline confirmation (Delete?, then No).
 3. Confirming sends the delete request. On 204 the listing reloads and the file is gone. On 404 the listing also reloads, since the file is already gone.
 4. Any other error (400, 403, 503) surfaces through the existing error panel without reloading.
 5. Directories never show a delete action.
@@ -48,7 +48,7 @@ As a member of a group with the delete grant, I want to delete a visible file fr
 - The access gate evaluates the delete path like the other data endpoints: a hidden path answers 404 and the gate stores the access context for the handler.
 - Handler order: validate path, 404 for hidden, 403 when `can_delete` is false (a pure in-memory authorization check that runs before any filesystem access), then the filesystem resolution, 400 for a non-regular-file target (classified during the target resolution), then remove.
 - Target resolution is symlink-safe: the parent directory is canonicalized and verified to be within the shared root, and the final name (a single validated segment) is appended after that resolution. The entry is classified with `symlink_metadata` (no symlink following), so `remove_file` cannot reach outside the root. This differs from download, which serves the canonicalized target.
-- `remove_file` errors map onto the existing shapes: NotFound becomes 404 (a concurrent delete), PermissionDenied becomes 503 naming the unwritable directory. That message is the fail-closed signal for a read-only mount; there is no startup writability check, the OS-level error at delete time is the enforcement.
+- `remove_file` errors map onto the existing shapes: NotFound becomes 404 (a concurrent delete), PermissionDenied becomes 503 with the fixed unwritable-mount message. The message names no host path: naming the directory would leak it, and the operator knows the shared root from config. That message is the fail-closed signal for a read-only mount; there is no startup writability check, the OS-level error at delete time is the enforcement.
 - The test-only Disabled state (no access context) allows delete, matching the existing pre-access behavior of the test binaries; production always has the access block.
 - CSRF: the DELETE method is not a CORS simple request, so a cross-origin attacker would need a preflight the backend never approves, and the session cookie is SameSite=Lax so a cross-site fetch does not carry it. No extra token needed.
 
@@ -85,6 +85,6 @@ As a member of a group with the delete grant, I want to delete a visible file fr
 ## Completion Notes
 
 - The per-grant `delete` boolean defaults to false; only grant allow entries count, so the global baseline is never deletable.
-- `DELETE /api/v1/file` returns 204 on success, 400 for a non-regular-file target, 403 for a visible file the user may not delete, 404 for hidden paths, and 503 with a message naming the unwritable directory when the shared root is read-only.
+- `DELETE /api/v1/file` returns 204 on success, 400 for a non-regular-file target, 403 for a visible file the user may not delete, 404 for hidden paths, and 503 with the fixed unwritable-mount message when the shared root is read-only. The message names no host path.
 - Target resolution is symlink-safe: the parent directory is canonicalized and verified to be within the shared root, and the entry is classified with `symlink_metadata`, so `remove_file` never follows a symlink for the final component.
 - The generated client returns `Promise<void>` for the 204; the frontend shows the delete action behind a two-step inline confirmation.

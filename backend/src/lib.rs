@@ -487,6 +487,44 @@ fn validate_relative_path(input: &str) -> Result<String, ApiError> {
     Ok(parts.join("/"))
 }
 
+/// Maps a filesystem error onto the API shapes: a NotFound becomes the
+/// caller's not-found message, anything else is the shared 503. The
+/// PermissionDenied arm on removal is delete-specific and stays at that
+/// call site, so the shared mapping cannot drift from the handlers and the
+/// removal path cannot disagree about the fail-closed signal.
+fn not_found_or_unavailable(error: &std::io::Error, not_found_message: &str) -> ApiError {
+    if error.kind() == ErrorKind::NotFound {
+        ApiError::not_found(not_found_message)
+    } else {
+        ApiError::unavailable("The shared directory is unavailable.")
+    }
+}
+
+/// Resolves the metadata of an entry inside an already-resolved parent,
+/// trying the literal name first and falling back to the percent-decoded
+/// bytes: entries whose names are not valid UTF-8 are listed percent-encoded
+/// and must be re-opened through the decoded bytes. Classification is the
+/// caller's job; `symlink_metadata` does not follow symlinks.
+async fn entry_metadata(
+    parent: &Path,
+    name: &str,
+    not_found_message: &str,
+) -> Result<(PathBuf, std::fs::Metadata), ApiError> {
+    let literal_target = parent.join(name);
+    match tokio::fs::symlink_metadata(&literal_target).await {
+        Ok(meta) => Ok((literal_target, meta)),
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            let decoded_name = percent_decode_relative_path(name)?;
+            let decoded_target = parent.join(&decoded_name);
+            let meta = tokio::fs::symlink_metadata(&decoded_target)
+                .await
+                .map_err(|error| not_found_or_unavailable(&error, not_found_message))?;
+            Ok((decoded_target, meta))
+        }
+        Err(error) => Err(not_found_or_unavailable(&error, not_found_message)),
+    }
+}
+
 fn ensure_within_root(root: &Path, candidate: &Path) -> Result<(), ApiError> {
     if candidate == root || candidate.starts_with(root) {
         Ok(())
@@ -610,17 +648,9 @@ async fn canonical_entry_target(
             let decoded = percent_decode_relative_path(relative)?;
             tokio::fs::canonicalize(root.join(decoded))
                 .await
-                .map_err(|error| {
-                    if error.kind() == ErrorKind::NotFound {
-                        ApiError::not_found(not_found_message)
-                    } else {
-                        ApiError::unavailable("The shared directory is unavailable.")
-                    }
-                })
+                .map_err(|error| not_found_or_unavailable(&error, not_found_message))
         }
-        Err(_) => Err(ApiError::unavailable(
-            "The shared directory is unavailable.",
-        )),
+        Err(error) => Err(not_found_or_unavailable(&error, not_found_message)),
     }
 }
 
@@ -1100,7 +1130,13 @@ async fn delete_file(
     access_context: Option<Extension<access::AccessContext>>,
 ) -> Result<Response, ApiError> {
     let config = get_app_config()?;
-    let relative = validate_relative_path(&query.p)?;
+    let relative = validate_relative_path(&query.p).map_err(|error| match error.kind {
+        // A `..` probe surfaces the shared validator's ParentDir arm; the
+        // file endpoint keeps the single hidden/nonexistent message shape
+        // the delete contract pins.
+        ApiErrorKind::NotFound => ApiError::not_found("The requested file could not be found."),
+        _ => error,
+    })?;
     if relative.is_empty() {
         return Err(ApiError::bad_request("The requested path is invalid."));
     }
@@ -1148,34 +1184,15 @@ async fn delete_file(
     }
 
     // The literal form first: the target is the name the listing rendered,
-    // which may itself contain `%` sequences that must not be decoded.
-    let literal_target = parent_canonical.join(&name);
-    let (target, meta) = match tokio::fs::symlink_metadata(&literal_target).await {
-        Ok(value) => (literal_target, value),
-        Err(error) if error.kind() == ErrorKind::NotFound => {
-            // The percent-decoded form: entries whose names are not valid
-            // UTF-8 are listed percent-encoded and must be re-opened through
-            // the decoded bytes.
-            let decoded_name = percent_decode_relative_path(&name)?;
-            let decoded_target = parent_canonical.join(&decoded_name);
-            let decoded_meta =
-                tokio::fs::symlink_metadata(&decoded_target)
-                    .await
-                    .map_err(|error| {
-                        if error.kind() == ErrorKind::NotFound {
-                            ApiError::not_found("The requested file could not be found.")
-                        } else {
-                            ApiError::unavailable("The shared directory is unavailable.")
-                        }
-                    })?;
-            (decoded_target, decoded_meta)
-        }
-        Err(_) => {
-            return Err(ApiError::unavailable(
-                "The shared directory is unavailable.",
-            ));
-        }
-    };
+    // which may itself contain `%` sequences that must not be decoded. The
+    // shared resolution falls back to the percent-decoded bytes and keeps
+    // the decode-and-revalidate discipline in one place.
+    let (target, meta) = entry_metadata(
+        &parent_canonical,
+        &name,
+        "The requested file could not be found.",
+    )
+    .await?;
     // symlink_metadata classifies the entry itself: only regular files are
     // deleted, directories and symlinks are refused.
     if !meta.is_file() {
@@ -1185,17 +1202,17 @@ async fn delete_file(
     }
 
     tokio::fs::remove_file(&target).await.map_err(|error| {
-        if error.kind() == ErrorKind::NotFound {
-            // A concurrent delete removed the file first.
-            ApiError::not_found("The requested file could not be found.")
-        } else if error.kind() == ErrorKind::PermissionDenied {
-            // The fail-closed signal for a read-only mount: name the
-            // unwritable directory so the operator can fix the mount.
+        if error.kind() == ErrorKind::PermissionDenied {
+            // The fail-closed signal for a read-only mount. The message is a
+            // fixed string that names no host path: naming the directory
+            // would leak it, and the operator knows the shared root from
+            // config.
             ApiError::unavailable(
                 "The shared directory is not writable; file deletion requires a writable mount.",
             )
         } else {
-            ApiError::unavailable("The shared directory is unavailable.")
+            // A concurrent delete removed the file first.
+            not_found_or_unavailable(&error, "The requested file could not be found.")
         }
     })?;
 

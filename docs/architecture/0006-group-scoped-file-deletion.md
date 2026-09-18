@@ -67,7 +67,9 @@ the one this decision changes.
 
 5. **Failure modes map onto the existing shapes with a fail-closed signal.**
    NotFound from `remove_file` becomes 404 (a concurrent delete);
-   PermissionDenied becomes 503 naming the unwritable directory. That message is
+   PermissionDenied becomes 503 with the fixed unwritable-mount message. The
+   message names no host path: naming the directory would leak it, and the
+   operator knows the shared root from config. That message is
    the fail-closed signal for a read-only mount. There is no startup writability
    check: the OS-level error at delete time is the enforcement, and a startup
    check would duplicate what the kernel already refuses.
@@ -141,6 +143,6 @@ Follow-up work:
   for the final component.
 - 404 for hidden paths on the delete endpoint prevents existence probing.
 - Rollout: operators must mount the shared root writable for delete-allowed
-  directories and configure the `delete` flag consciously. The 503 message
-  naming an unwritable directory is the fail-closed signal when the mount flag
+  directories and configure the `delete` flag consciously. The fixed
+  unwritable-mount message is the fail-closed signal when the mount flag
   and the config disagree.

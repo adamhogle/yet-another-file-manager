@@ -76,7 +76,7 @@ pub struct AccessConfigFile {
 #[derive(Debug, Deserialize)]
 pub struct GrantFile {
     #[serde(rename = "delete", default)]
-    delete: Option<bool>,
+    delete: bool,
     #[serde(rename = "allow", default)]
     allow: Vec<AllowEntryFile>,
 }
@@ -245,7 +245,7 @@ pub fn validate_access_config(block: AccessConfigFile) -> Result<AccessConfig, S
         grants.insert(
             group_name,
             Grant {
-                delete: grant.delete.unwrap_or(false),
+                delete: grant.delete,
                 allow: entries,
             },
         );
@@ -1303,7 +1303,7 @@ mod tests {
             grants: BTreeMap::from([(
                 "yafm-tv".to_string(),
                 GrantFile {
-                    delete: None,
+                    delete: false,
                     allow: Vec::new(),
                 },
             )]),

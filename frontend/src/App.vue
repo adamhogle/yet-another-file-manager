@@ -541,9 +541,13 @@ h1 {
 
 /* The inline confirmation needs two buttons; the actions track is one icon
    wide otherwise. A confirming row widens the track so the buttons fit
-   without pushing the other columns out of the panel. */
-.details-row.is-confirming {
-  grid-template-columns: minmax(8rem, 1fr) 9rem 11.5rem auto;
+   without pushing the other columns out of the panel. Phone widths stack
+   the columns instead and size the actions area to its content, so this
+   override only applies above the stack breakpoint. */
+@media (min-width: 641px) {
+  .details-row.is-confirming {
+    grid-template-columns: minmax(8rem, 1fr) 9rem 11.5rem auto;
+  }
 }
 
 .confirm-delete,
