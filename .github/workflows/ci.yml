@@ -16,7 +16,7 @@ concurrency:
 jobs:
   quality:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
 
     steps:
       - name: Checkout
@@ -42,6 +42,11 @@ jobs:
         with:
           toolchain: ${{ steps.rust-pin.outputs.channel }}
           components: clippy, rustfmt
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
@@ -82,6 +87,11 @@ jobs:
 
       - name: Tests
         run: npm run test
+
+      - name: Rust test coverage gate
+        run: |
+          npm run backend:coverage
+          npm run backend:coverage:baseline
 
       - name: Build
         run: npm run build
