@@ -183,9 +183,15 @@ async fn run() -> Result<(), String> {
 
     tracing::info!("backend listening on http://{bound_address}");
 
-    axum::serve(listener, backend::app_router())
-        .await
-        .map_err(|_| "backend server crashed".to_string())?;
+    // Attach the peer socket so the access log can resolve the client IP
+    // (the handlers read it as an `Option`, so the test harness and any
+    // direct serve without connect info still work).
+    axum::serve(
+        listener,
+        backend::app_router().into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await
+    .map_err(|_| "backend server crashed".to_string())?;
 
     Ok(())
 }
