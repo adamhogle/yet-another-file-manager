@@ -6,6 +6,13 @@ showHidden: false
 listenAddress: 0.0.0.0
 listenPort: 8080
 
+# Client IP used by the nginx-style access log (login/download lines go to the
+# stdout stream; this only controls which address is logged). Default false:
+# the peer socket IP is logged and a stray X-Forwarded-For header is ignored.
+# Set true only when a trusted reverse proxy (nginx) is in front and
+# overwrites X-Forwarded-For with the real client IP.
+trustProxy: false
+
 # Access control (ADR-0005). Required: the backend refuses to start without
 # it. A user's visible root is the union of the global allow list and the
 # allow entries of their authentik groups (from the ID token's groups claim,

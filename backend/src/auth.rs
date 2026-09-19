@@ -1,11 +1,12 @@
 //! Authentication state, session cookies and the auth gate middleware for the
 //! backend.
 
+use std::net::SocketAddr;
 use std::sync::RwLock;
 use std::time::{Duration as StdDuration, SystemTime, UNIX_EPOCH};
 
 use axum::Json;
-use axum::extract::{Query, Request};
+use axum::extract::{ConnectInfo, Extension, Query, Request};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -29,6 +30,7 @@ use sha2::{Digest, Sha256};
 use url::Url;
 
 use crate::PublicErrorResponse;
+use crate::access_log;
 
 /// Validated OIDC provider configuration from the config file's nested `oidc`
 /// block. This is the single runtime shape. The parse-time shape lives in
@@ -957,15 +959,32 @@ pub async fn login(Query(query): Query<ReturnToQuery>) -> Result<Response, AuthF
 pub async fn callback(
     Query(query): Query<CallbackQuery>,
     headers: HeaderMap,
+    connect_info: Option<Extension<ConnectInfo<SocketAddr>>>,
 ) -> Result<Response, AuthFlowError> {
-    callback_response(
+    let client_ip =
+        access_log::client_ip(connect_info.as_deref(), &headers, crate::get_trust_proxy());
+    let user_agent = access_log::user_agent(&headers);
+    let cookie_header = headers
+        .get(header::COOKIE)
+        .and_then(|value| value.to_str().ok());
+    // The success line is emitted inside `callback_response` (where the
+    // identity claims are in scope); the failure line comes from the error
+    // here, so exactly one access line is logged per callback outcome.
+    match callback_response(
         get_auth_state(),
-        headers
-            .get(header::COOKIE)
-            .and_then(|value| value.to_str().ok()),
+        cookie_header,
         &query,
+        &client_ip,
+        &user_agent,
     )
     .await
+    {
+        Ok(response) => Ok(response),
+        Err(error) => {
+            access_log::log_login_failure(&error, &client_ip, &user_agent);
+            Err(error)
+        }
+    }
 }
 
 /// `GET /api/v1/auth/logout`: idempotent — clears the session cookie and 302s
@@ -1007,6 +1026,8 @@ async fn callback_response(
     state: Option<&AuthState>,
     cookie_header: Option<&str>,
     query: &CallbackQuery,
+    client_ip: &str,
+    user_agent: &str,
 ) -> Result<Response, AuthFlowError> {
     let code = callback_code(query)?;
     let Some(AuthState::Oidc(config)) = state else {
@@ -1050,6 +1071,7 @@ async fn callback_response(
         );
     }
     let cleared = jar.clear_login();
+    access_log::log_login_success(&claims, client_ip, user_agent);
     Ok(redirect_with_cookies(
         sanitize_return_to(Some(&login.return_to)).as_str(),
         vec![minted, cleared],
@@ -2273,7 +2295,7 @@ mod tests {
             state: Some("state".to_string()),
         };
 
-        let error = callback_response(Some(&AuthState::Oidc(config)), None, &query)
+        let error = callback_response(Some(&AuthState::Oidc(config)), None, &query, "-", "-")
             .await
             .expect_err("a missing login cookie must be rejected");
         assert!(matches!(error, AuthFlowError::Unauthorized));
@@ -2301,9 +2323,15 @@ mod tests {
             state: Some("a-different-state".to_string()),
         };
 
-        let error = callback_response(Some(&AuthState::Oidc(config)), Some(&cookie_header), &query)
-            .await
-            .expect_err("a state mismatch must be rejected");
+        let error = callback_response(
+            Some(&AuthState::Oidc(config)),
+            Some(&cookie_header),
+            &query,
+            "-",
+            "-",
+        )
+        .await
+        .expect_err("a state mismatch must be rejected");
         assert!(matches!(error, AuthFlowError::Unauthorized));
     }
 
@@ -2328,7 +2356,7 @@ mod tests {
             state: Some("state".to_string()),
         };
 
-        let error = callback_response(get_auth_state(), None, &query)
+        let error = callback_response(get_auth_state(), None, &query, "-", "-")
             .await
             .expect_err("the Disabled state cannot authenticate");
         assert!(matches!(error, AuthFlowError::Unavailable));

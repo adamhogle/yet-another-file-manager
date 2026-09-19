@@ -2,15 +2,15 @@ use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
 use std::io::{ErrorKind, SeekFrom};
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::body::Body;
-use axum::extract::{Extension, OriginalUri, Query, Request};
-use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::extract::{ConnectInfo, Extension, OriginalUri, Query, Request};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get};
@@ -31,6 +31,7 @@ use tower_http::trace::TraceLayer;
 use utoipa::{OpenApi, ToSchema};
 
 pub mod access;
+pub mod access_log;
 pub mod auth;
 use auth::AuthOidcConfig;
 use auth::SessionClaims;
@@ -106,6 +107,8 @@ struct ConfigFile {
     oidc: Option<OidcConfigFile>,
     #[serde(rename = "access")]
     access: Option<access::AccessConfigFile>,
+    #[serde(rename = "trustProxy")]
+    trust_proxy: Option<bool>,
 }
 
 /// Parse-time shape of the nested `oidc` block. Kept optional inside
@@ -157,6 +160,7 @@ struct AppConfig {
     listen_port: u16,
     oidc: Option<AuthOidcConfig>,
     access: Option<access::AccessConfig>,
+    trust_proxy: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -306,6 +310,7 @@ fn load_app_config(config_path: &Path) -> Result<AppConfig, String> {
         listen_port: parsed.listen_port.unwrap_or(8080),
         oidc,
         access,
+        trust_proxy: parsed.trust_proxy.unwrap_or(false),
     })
 }
 
@@ -457,6 +462,16 @@ pub fn get_access_state_config() -> Option<&'static access::AccessConfig> {
 /// initialized.
 pub fn get_shared_root() -> Option<&'static std::path::Path> {
     CONFIG.get().map(|config| config.shared_root.as_path())
+}
+
+/// Read access to the `trustProxy` access-log flag. The default (and the
+/// value before config initialization) is false: forwarded client IP headers
+/// are ignored unless an operator explicitly trusts a reverse proxy.
+pub fn get_trust_proxy() -> bool {
+    CONFIG
+        .get()
+        .map(|config| config.trust_proxy)
+        .unwrap_or(false)
 }
 
 fn validate_relative_path(input: &str) -> Result<String, ApiError> {
@@ -1235,6 +1250,66 @@ async fn delete_file(
     )
 )]
 async fn download(
+    method: Method,
+    request_headers: HeaderMap,
+    Query(query): Query<PathQuery>,
+    identity: Option<Extension<SessionClaims>>,
+    connect_info: Option<Extension<ConnectInfo<SocketAddr>>>,
+) -> Result<Response, ApiError> {
+    // Resolve the client IP and user agent before `request_headers` and
+    // `query` move into the log/outcome split below. The access log runs for
+    // every outcome the inner handler produces: the served status and byte
+    // count are read back off the response (Content-Length is set for the
+    // 200/206 body) or defaulted to zero for non-body outcomes.
+    let client_ip =
+        access_log::client_ip(connect_info.as_deref(), &request_headers, get_trust_proxy());
+    let user_agent = access_log::user_agent(&request_headers);
+    let referer = access_log::referer(&request_headers);
+    let user = access_log::identity_label(identity.as_deref());
+    let raw_path = query.p.clone();
+
+    let result = download_inner(request_headers, Query(query)).await;
+
+    let (status, bytes) = match &result {
+        Ok(response) => {
+            let status = response.status();
+            let promised = if status == StatusCode::OK || status == StatusCode::PARTIAL_CONTENT {
+                response
+                    .headers()
+                    .get(header::CONTENT_LENGTH)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+            // axum routes HEAD to the GET handler with the body removed, so a
+            // HEAD promises a Content-Length while transferring zero bytes.
+            // Matching nginx's actual-bytes semantics, a HEAD logs 0. A client
+            // that disconnects mid-stream still logs the promised length; the
+            // count is not the number of bytes actually written.
+            let bytes = if method == Method::HEAD { 0 } else { promised };
+            (status, bytes)
+        }
+        Err(error) => (error.status(), 0),
+    };
+
+    access_log::log_download(
+        &client_ip,
+        &user,
+        &raw_path,
+        status,
+        bytes,
+        &referer,
+        &user_agent,
+    );
+    result
+}
+
+/// The download handler's logic, separated from the wrapper so the access log
+/// can emit one line per outcome without duplicating every response/error
+/// branch.
+async fn download_inner(
     request_headers: HeaderMap,
     Query(query): Query<PathQuery>,
 ) -> Result<Response, ApiError> {
@@ -1579,6 +1654,30 @@ mod tests {
             root.canonicalize().expect("canonical root")
         );
         assert!(config.oidc.is_none());
+    }
+
+    #[test]
+    fn trust_proxy_defaults_to_false_and_is_read_from_config() {
+        let temp = TempDir::new().expect("temp dir");
+        let root = temp.path().join("share");
+        fs::create_dir_all(&root).expect("create root");
+
+        // Omitted -> false (the safe default; forwarded client IPs are ignored).
+        let default_path = temp.path().join("default.yaml");
+        fs::write(&default_path, format!("sharedRoot: {}\n", root.display()))
+            .expect("write config");
+        let config = load_app_config(&default_path).expect("load default config");
+        assert!(!config.trust_proxy);
+
+        // Explicitly enabled -> true. The flag is parsed at the top level.
+        let enabled_path = temp.path().join("enabled.yaml");
+        fs::write(
+            &enabled_path,
+            format!("sharedRoot: {}\ntrustProxy: true\n", root.display()),
+        )
+        .expect("write config");
+        let config = load_app_config(&enabled_path).expect("load enabled config");
+        assert!(config.trust_proxy);
     }
 
     #[test]
