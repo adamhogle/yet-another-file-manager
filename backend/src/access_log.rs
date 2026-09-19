@@ -9,7 +9,7 @@
 //! logged, falling back to the peer IP when the header is absent.
 
 use std::fmt::Write as _;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 
 use axum::extract::ConnectInfo;
 use axum::http::{HeaderMap, StatusCode, header};
@@ -24,10 +24,11 @@ pub const ACCESS_LOG_TARGET: &str = "yafm::access";
 const UNKNOWN: &str = "-";
 
 /// Resolves the client IP to log. When `trust_proxy` is true, the left-most
-/// `X-Forwarded-For` hop (the client behind a trusted reverse proxy) is used;
-/// otherwise (or when the header is absent or blank) the peer socket IP. Both
-/// absent -> "-", so nothing spoofed ever reaches the log unless the operator
-/// enabled the trust.
+/// `X-Forwarded-For` hop (the client behind a trusted reverse proxy) is used
+/// when it parses as an IP address; otherwise (when the header is absent,
+/// blank, or carries a value that is not an IP) the peer socket IP. Nothing
+/// spoofed or malformed reaches the log unless the operator enabled the
+/// trust, and a validated IP is at most 45 characters.
 pub fn client_ip(
     connect_info: Option<&ConnectInfo<SocketAddr>>,
     headers: &HeaderMap,
@@ -39,9 +40,15 @@ pub fn client_ip(
             .and_then(|value| value.to_str().ok())
         && let Some(first) = value.split(',').next()
     {
-        let ip = first.trim();
-        if !ip.is_empty() {
-            return ip.to_string();
+        // The left-most hop stays untrustworthy even under `trustProxy`: a
+        // spoofed value may not be an actual address (MDN's X-Forwarded-For
+        // guidance). Only a value that parses as an IP address is logged,
+        // which bounds the field; anything else falls back to the peer
+        // socket IP below. The first header's first entry is the left-most
+        // hop of the combined list, so `get` alone is the right read.
+        let hop = first.trim();
+        if hop.parse::<IpAddr>().is_ok() {
+            return hop.to_string();
         }
     }
     match connect_info {
@@ -280,6 +287,42 @@ mod tests {
         assert_eq!(
             client_ip(Some(&peer([10, 0, 0, 2])), &blank, true),
             "10.0.0.2"
+        );
+    }
+
+    #[test]
+    fn client_ip_rejects_a_hop_that_is_not_an_ip_under_trust() {
+        // MDN's X-Forwarded-For guidance: spoofed values may not be actual
+        // addresses, so only a hop that parses as an IP is logged.
+        let garbage = header_map(&[("x-forwarded-for", "not-an-ip")]);
+        assert_eq!(
+            client_ip(Some(&peer([10, 0, 0, 2])), &garbage, true),
+            "10.0.0.2"
+        );
+
+        // A hop carrying a port is not an X-Forwarded-For address either.
+        let port = header_map(&[("x-forwarded-for", "203.0.113.7:8080")]);
+        assert_eq!(
+            client_ip(Some(&peer([10, 0, 0, 2])), &port, true),
+            "10.0.0.2"
+        );
+
+        // Delimiter characters (OWASP: sanitize CR/LF and delimiters) are
+        // rejected before the value is considered, so they never reach the
+        // log through the IP field either.
+        let delimiters = header_map(&[("x-forwarded-for", "1.2.3.4;5.6.7.8")]);
+        assert_eq!(
+            client_ip(Some(&peer([10, 0, 0, 2])), &delimiters, true),
+            "10.0.0.2"
+        );
+    }
+
+    #[test]
+    fn client_ip_accepts_an_ipv6_hop_under_trust() {
+        let headers = header_map(&[("x-forwarded-for", "2001:db8:85a3:8d3:1319:8a2e:370:7348")]);
+        assert_eq!(
+            client_ip(Some(&peer([10, 0, 0, 2])), &headers, true),
+            "2001:db8:85a3:8d3:1319:8a2e:370:7348"
         );
     }
 

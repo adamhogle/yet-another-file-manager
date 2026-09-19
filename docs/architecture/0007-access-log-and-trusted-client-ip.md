@@ -20,8 +20,12 @@ defeats the purpose of an access log.
   flow through the existing stdout stream. Access logging is always on.
 - Add an opt-in `trustProxy` config flag, default `false`. When `false`, the
   logged client IP is the peer socket and a stray `X-Forwarded-For` is
-  ignored. When `true`, the left-most `X-Forwarded-For` hop is used, falling
-  back to the peer when the header is absent.
+  ignored. When `true`, the left-most `X-Forwarded-For` hop is logged only
+  when it parses as an IP address, falling back to the peer socket IP when
+  the header is absent or the hop is not an IP (MDN's X-Forwarded-For
+  guidance: the left-most hop is untrustworthy and spoofed values may not be
+  actual addresses). Private-range hops are not filtered: deployments on a
+  LAN would lose legitimate audit data.
 - Enable peer-socket extraction by serving with
   `into_make_service_with_connect_info::<SocketAddr>()`, and read it in
   handlers as `Option<ConnectInfo<SocketAddr>>` so the test harness, which
@@ -55,5 +59,8 @@ defeats the purpose of an access log.
 - No secrets or host paths are logged; only user display name, requested
   relative path, status, and byte count.
 - If the proxy does not sanitize `X-Forwarded-For`, a client can still inject
-  leading hops; both the feature spec and this record note that the left-most
-  hop is trusted verbatim (future refinement: validate it as an IP).
+  leading hops; the left-most hop is logged only when it parses as an IP
+  address, so injected garbage, ports and delimiters never reach the audit
+  trail and the field is bounded to 45 characters. Quotes, backslashes and
+  control characters in every user-controlled field are escaped at render
+  time, so a forged path or header cannot split a log line.

@@ -64,7 +64,9 @@ Configuration fields:
 - `trustProxy` (optional, default `false`): when `true`, the nginx-style access
   log records the client IP from the left-most `X-Forwarded-For` header (the
   client behind a trusted reverse proxy); when `false` (the default) the peer
-  socket IP is logged and a spoofed `X-Forwarded-For` is ignored. Set it only
+  socket IP is logged and a spoofed `X-Forwarded-For` is ignored. Under
+  `trustProxy`, only a hop that parses as an IP address is logged, so a hop
+  carrying a port or garbage falls back to the peer socket IP. Set it only
   when a trusted proxy is in front and overwrites that header.
 - `oidc.issuer` (required): the provider's issuer URL, from the provider's
   `.well-known/openid-configuration` (authentik's default issuer mode is per-provider:

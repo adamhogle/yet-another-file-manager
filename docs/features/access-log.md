@@ -81,7 +81,12 @@ failed login and each file download, so that I can audit who did what and when.
 
 - Client IP is the peer socket by default. `X-Forwarded-For` is only trusted
   when the operator sets `trustProxy: true`, so a spoofed header cannot
-  appear in logs unless a reverse proxy is explicitly in front.
+  appear in logs unless a reverse proxy is explicitly in front. Under
+  `trustProxy`, the left-most hop is logged only when it parses as an IP
+  address (MDN's X-Forwarded-For guidance: spoofed values may not be actual
+  addresses), which bounds the field to 45 characters; a hop carrying a port
+  or garbage falls back to the peer socket IP. Private-range hops are not
+  filtered, because a deployment on a LAN would lose legitimate audit data.
 - Log lines carry the user display name and the requested relative path; no
   host filesystem path, OIDC client secret, signing key, or `returnTo` is
   logged.
@@ -103,13 +108,15 @@ failed login and each file download, so that I can audit who did what and when.
       is ignored and the peer IP is logged.
 - [x] When `trustProxy` is `true`, the left-most `X-Forwarded-For` hop is
       logged, falling back to the peer IP when the header is absent.
+- [x] When `trustProxy` is `true`, a left-most hop that does not parse as an
+      IP address is rejected and the peer IP is logged.
 - [x] Existing router tests still pass unchanged.
 
 ## Test Plan
 
-- Unit: `client_ip` resolution (peer, trusted forwarded, fallback, absent
-  connect info), `user_agent`, and the `Line::render` shape
-  (`backend/src/access_log.rs`).
+- Unit: `client_ip` resolution (peer, trusted forwarded, non-IP hop
+  rejection, fallback, absent connect info), `user_agent`, and the
+  `Line::render` shape (`backend/src/access_log.rs`).
 - Unit: the login failure status mapping (401 vs 503).
 - Unit: the escaped combined-log shape (control characters and quotes cannot
   forge a second line).
@@ -117,8 +124,3 @@ failed login and each file download, so that I can audit who did what and when.
   200/206/304/416 outcomes, and a forged newline in the path renders escaped
   (`backend/tests/access_log.rs`).
 - Regression: `cargo test --release --lib`, `npm run check`.
-
-## Open Questions
-
-- Should the left-most `X-Forwarded-For` hop be validated as an IP before it
-  is logged (defense against garbage in the header)?
