@@ -97,8 +97,10 @@ fn emit(line: &str) {
 
 /// Escapes the characters that would break the combined-log shape: `"` and
 /// `\\` inside a quoted field, and control characters (a newline would forge
-/// extra log lines) as `\\xHH`. Multi-byte UTF-8 passes through, so display
-/// names and paths stay readable.
+/// extra log lines). Code points up to U+00FF render as `\\xHH`, code points
+/// above as `\\uHHHH`: `\\x` escapes are always two digits and `\\u` escapes
+/// four, so neither form is ambiguous on re-parse. Multi-byte printable
+/// characters pass through, so display names and paths stay readable.
 fn escape_field(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
     for character in value.chars() {
@@ -107,8 +109,20 @@ fn escape_field(value: &str) -> String {
             escaped.push_str("\\\"");
         } else if character == '\\' {
             escaped.push_str("\\\\");
-        } else if code < 0x20 || code == 0x7f {
-            let _ = write!(escaped, "\\x{code:02x}");
+        } else if code < 0x20
+            || code == 0x7f
+            || (0x80..=0x9f).contains(&code)
+            || code == 0x2028
+            || code == 0x2029
+        {
+            // C0, DEL and C1 controls, plus the Unicode line and paragraph
+            // separators, break the line shape just like a raw newline: some
+            // log viewers render U+2028/U+2029 as line breaks.
+            if code <= 0xff {
+                let _ = write!(escaped, "\\x{code:02x}");
+            } else {
+                let _ = write!(escaped, "\\u{code:04x}");
+            }
         } else {
             escaped.push(character);
         }
@@ -117,7 +131,7 @@ fn escape_field(value: &str) -> String {
 }
 
 /// The fields of one combined access-log line, in nginx combined-log order:
-/// `ip - user [time] "event" status bytes "referer" "user-agent"`.
+/// `ip - "user" [time] "event" status bytes "referer" "user-agent"`.
 struct Line {
     ip: String,
     user: String,
@@ -133,7 +147,7 @@ impl Line {
     /// time). Pure and deterministic for testing.
     fn render(&self, timestamp: &str) -> String {
         format!(
-            "{} - {} [{}] \"{}\" {} {} \"{}\" \"{}\"",
+            "{} - \"{}\" [{}] \"{}\" {} {} \"{}\" \"{}\"",
             escape_field(&self.ip),
             escape_field(&self.user),
             timestamp,
@@ -365,7 +379,45 @@ mod tests {
         };
         assert_eq!(
             line.render("2026-01-01T00:00:00Z"),
-            "203.0.113.7 - alice [2026-01-01T00:00:00Z] \"DOWNLOAD docs/demo.txt\" 206 512 \"-\" \"curl/8.0\""
+            "203.0.113.7 - \"alice\" [2026-01-01T00:00:00Z] \"DOWNLOAD docs/demo.txt\" 206 512 \"-\" \"curl/8.0\""
+        );
+    }
+
+    #[test]
+    fn a_user_label_with_spaces_cannot_shift_the_columns() {
+        // The display name is free-form, so the user field is quoted like the
+        // referer and user-agent: a space inside it stays inside the quoted
+        // field and cannot shift every following column.
+        let line = Line {
+            ip: "203.0.113.7".to_string(),
+            user: "Test User".to_string(),
+            event: "DOWNLOAD docs/demo.txt".to_string(),
+            status: StatusCode::OK,
+            bytes: 5,
+            referer: UNKNOWN.to_string(),
+            user_agent: UNKNOWN.to_string(),
+        };
+        assert_eq!(
+            line.render("2026-01-01T00:00:00Z"),
+            "203.0.113.7 - \"Test User\" [2026-01-01T00:00:00Z] \"DOWNLOAD docs/demo.txt\" 200 5 \"-\" \"-\""
+        );
+    }
+
+    #[test]
+    fn c1_controls_and_unicode_separators_cannot_forge_log_lines() {
+        let line = Line {
+            ip: "127.0.0.1".to_string(),
+            user: "a\u{0085}b\u{2028}c\u{2029}d".to_string(),
+            event: "DOWNLOAD docs/demo.txt".to_string(),
+            status: StatusCode::OK,
+            bytes: 5,
+            referer: UNKNOWN.to_string(),
+            user_agent: UNKNOWN.to_string(),
+        };
+        let rendered = line.render("2026-01-01T00:00:00Z");
+        assert_eq!(
+            rendered,
+            "127.0.0.1 - \"a\\x85b\\u2028c\\u2029d\" [2026-01-01T00:00:00Z] \"DOWNLOAD docs/demo.txt\" 200 5 \"-\" \"-\""
         );
     }
 
@@ -438,7 +490,7 @@ mod tests {
         };
         let rendered = line.render("2026-01-01T00:00:00Z");
         assert!(rendered.starts_with(&format!(
-            "203.0.113.7 - {} [",
+            "203.0.113.7 - \"{}\" [",
             identity_label(Some(&claims))
         )));
         assert!(rendered.contains("\"LOGIN\" 302 0"));

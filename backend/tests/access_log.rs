@@ -138,6 +138,21 @@ async fn downloads_and_logins_emit_nginx_style_access_lines() {
         .expect("not-modified response");
     assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
 
+    // A HEAD request is routed to the GET handler with the body removed, so
+    // it logs zero bytes even though the handler promises a Content-Length.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/download?p=demo.txt")
+                .method("HEAD")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("head response");
+    assert_eq!(response.status(), StatusCode::OK);
+
     // A forged newline in the path passes validation (it is not a rejected
     // form) and misses the file lookup, so it is a 404 outcome. The rendered
     // line escapes it: one access line, no forged second line.
@@ -195,6 +210,10 @@ async fn downloads_and_logins_emit_nginx_style_access_lines() {
     assert!(
         captured.contains("\"DOWNLOAD demo.txt\" 304 0"),
         "expected a 304 line, got:\n{captured}"
+    );
+    assert!(
+        captured.contains("\"DOWNLOAD demo.txt\" 200 0"),
+        "expected the HEAD download to log zero bytes, got:\n{captured}"
     );
     assert!(
         captured.contains("\"DOWNLOAD a\\x0ab\" 404 0"),

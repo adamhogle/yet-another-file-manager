@@ -10,7 +10,7 @@ line was last set in `version.json`. See README, Versioning.
 
 ### Added
 
-- Added an nginx-style access log that emits a combined-log line for each login (success and failure) and each file download outcome in the existing tracing stream, under the `yafm::access` target. A new opt-in `trustProxy` config flag controls whether the logged client IP comes from `X-Forwarded-For` (behind a trusted reverse proxy) or the peer socket. Under `trustProxy`, the left-most hop is logged only when it parses as an IP address, and user-controlled fields are escaped at render time, so a forged path or header cannot split a log line.
+- Added an nginx-style access log that emits a line for each login (success and failure) and each file download outcome in the existing tracing stream, under the `yafm::access` target. A new opt-in `trustProxy` config flag controls whether the logged client IP comes from `X-Forwarded-For` (behind a trusted reverse proxy) or the peer socket. Under `trustProxy`, the left-most hop is logged only when it parses as an IP address, and user-controlled fields are escaped at render time, so a forged path or header cannot split a log line. The user field is quoted, so a display name with spaces cannot shift the columns, and a HEAD download logs zero bytes.
 
 ## [2026.09.20] - 2026-09-13
 

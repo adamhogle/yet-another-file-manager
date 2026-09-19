@@ -51,7 +51,8 @@ failed login and each file download, so that I can audit who did what and when.
    (401 or 503) and no user.
 2. A user requests `/api/v1/download?p=<path>`. One line is logged per outcome
    with the served status and byte count (200 = file size, 206 = range
-   length, otherwise 0).
+   length, otherwise 0; a HEAD logs 0 because axum routes HEAD to the GET
+   handler with the body removed).
 3. Log lines go to the existing stdout stream as `tracing::info!` events.
 
 ## Technical Notes
@@ -71,11 +72,24 @@ failed login and each file download, so that I can audit who did what and when.
   from the returned `AuthFlowError`.
 - The download handler is wrapped in `download_inner`; the wrapper derives the
   status and bytes (from `Content-Length` on 200/206) from the outcome and
-  logs once per request.
+  logs once per request. A HEAD logs 0 bytes: axum routes HEAD to the GET
+  handler with the body removed, so the handler promises a Content-Length
+  while transferring nothing (nginx parity). A client that disconnects
+  mid-stream still logs the promised length; the count is not the number of
+  bytes actually written.
 - Every user-controlled field (client IP, user, requested path, referer,
   user agent) is escaped at render time: `"` and `\` render as their escaped
-  form and control characters render as `\xHH`, so a forged `p=foo%0Abar`
-  cannot split the log line.
+  form, and control characters render as `\xHH` (code points up to U+00FF)
+  or `\uHHHH` (above), so a forged `p=foo%0Abar` cannot split the log line.
+- The user field is quoted because the display name is free-form (anything
+  the IdP sends), like the referer and user-agent; the status and byte
+  fields stay unquoted, and a display name with spaces cannot shift the
+  following columns.
+- The line is nginx-shaped, not a drop-in combined-log line: the event field
+  carries an event name (`LOGIN`, `DOWNLOAD <path>`) instead of the HTTP
+  request line, and the timestamp is RFC3339 instead of the CLF form, so
+  classic combined-log consumers need a custom format (goaccess and fail2ban
+  both support one).
 
 ## Security Considerations
 
@@ -90,9 +104,10 @@ failed login and each file download, so that I can audit who did what and when.
 - Log lines carry the user display name and the requested relative path; no
   host filesystem path, OIDC client secret, signing key, or `returnTo` is
   logged.
-- Quotes, backslashes and control characters in user-controlled fields are
-  escaped at render time, so a forged path or header cannot inject extra log
-  lines or break the combined-log field quoting.
+- Quotes, backslashes and control characters (C0, DEL, C1, and the Unicode
+  line/paragraph separators) in user-controlled fields are escaped at render
+  time, so a forged path or header cannot inject extra log lines or break
+  the combined-log field quoting.
 - The login failure line carries no user identity because the identity is not
   established when the flow fails.
 
@@ -110,6 +125,10 @@ failed login and each file download, so that I can audit who did what and when.
       logged, falling back to the peer IP when the header is absent.
 - [x] When `trustProxy` is `true`, a left-most hop that does not parse as an
       IP address is rejected and the peer IP is logged.
+- [x] A HEAD download logs zero bytes (axum routes HEAD to the GET handler
+      with the body removed).
+- [x] The user field is quoted, so a display name with spaces cannot shift
+      the following columns.
 - [x] Existing router tests still pass unchanged.
 
 ## Test Plan
@@ -118,9 +137,9 @@ failed login and each file download, so that I can audit who did what and when.
   rejection, fallback, absent connect info), `user_agent`, and the
   `Line::render` shape (`backend/src/access_log.rs`).
 - Unit: the login failure status mapping (401 vs 503).
-- Unit: the escaped combined-log shape (control characters and quotes cannot
-  forge a second line).
+- Unit: the escaped combined-log shape (C0/DEL/C1 controls, the Unicode
+  line/paragraph separators, and quotes cannot forge a second line).
 - Integration: the download wrapper derives the status and bytes for
-  200/206/304/416 outcomes, and a forged newline in the path renders escaped
-  (`backend/tests/access_log.rs`).
+  200/206/304/416 outcomes, a HEAD download logs zero bytes, and a forged
+  newline in the path renders escaped (`backend/tests/access_log.rs`).
 - Regression: `cargo test --release --lib`, `npm run check`.

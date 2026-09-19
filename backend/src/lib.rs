@@ -10,7 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::body::Body;
 use axum::extract::{ConnectInfo, Extension, OriginalUri, Query, Request};
-use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get};
@@ -1250,6 +1250,7 @@ async fn delete_file(
     )
 )]
 async fn download(
+    method: Method,
     request_headers: HeaderMap,
     Query(query): Query<PathQuery>,
     identity: Option<Extension<SessionClaims>>,
@@ -1272,7 +1273,7 @@ async fn download(
     let (status, bytes) = match &result {
         Ok(response) => {
             let status = response.status();
-            let bytes = if status == StatusCode::OK || status == StatusCode::PARTIAL_CONTENT {
+            let promised = if status == StatusCode::OK || status == StatusCode::PARTIAL_CONTENT {
                 response
                     .headers()
                     .get(header::CONTENT_LENGTH)
@@ -1282,6 +1283,12 @@ async fn download(
             } else {
                 0
             };
+            // axum routes HEAD to the GET handler with the body removed, so a
+            // HEAD promises a Content-Length while transferring zero bytes.
+            // Matching nginx's actual-bytes semantics, a HEAD logs 0. A client
+            // that disconnects mid-stream still logs the promised length; the
+            // count is not the number of bytes actually written.
+            let bytes = if method == Method::HEAD { 0 } else { promised };
             (status, bytes)
         }
         Err(error) => (error.status(), 0),
