@@ -467,11 +467,10 @@ mod tests {
                 referer: UNKNOWN.to_string(),
                 user_agent: "-".to_string(),
             };
+            let rendered = line.render("2026-01-01T00:00:00Z");
             assert!(
-                line.render("2026-01-01T00:00:00Z")
-                    .contains(&format!("\"LOGIN\" {expected} 0")),
-                "expected LOGIN {expected}, got: {}",
-                line.render("2026-01-01T00:00:00Z")
+                rendered.contains(&format!("\"LOGIN\" {expected} 0")),
+                "expected LOGIN {expected}, got: {rendered}"
             );
         }
     }

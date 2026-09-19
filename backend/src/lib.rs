@@ -5,7 +5,7 @@ use std::io::{ErrorKind, SeekFrom};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::body::Body;
@@ -484,18 +484,19 @@ fn validate_relative_path(input: &str) -> Result<String, ApiError> {
     }
 
     let mut parts: Vec<String> = Vec::new();
-    for component in Path::new(trimmed).components() {
+    // The split walks the raw segments: the leading `/` is refused above and
+    // Windows prefix/root components never occur on the Linux-only runtime
+    // target, so the components loop cannot see them either. Empty segments
+    // are skipped exactly like `Path::components` skips them.
+    for component in trimmed.split('/').filter(|part| !part.is_empty()) {
         match component {
-            Component::Normal(part) => {
-                parts.push(part.to_string_lossy().to_string());
-            }
-            Component::CurDir => {}
-            Component::ParentDir => {
+            "." => {}
+            ".." => {
                 return Err(ApiError::not_found(
                     "The requested directory could not be found.",
                 ));
             }
-            _ => return Err(ApiError::bad_request("The requested path is invalid.")),
+            part => parts.push(part.to_string()),
         }
     }
 
@@ -512,6 +513,21 @@ fn not_found_or_unavailable(error: &std::io::Error, not_found_message: &str) -> 
         ApiError::not_found(not_found_message)
     } else {
         ApiError::unavailable("The shared directory is unavailable.")
+    }
+}
+
+/// Maps a filesystem error from the file removal onto the API shapes: a
+/// PermissionDenied is the fail-closed signal for a read-only mount (the
+/// message names no host path), anything else falls back to the shared
+/// mapping. A named function so the mapping is testable without the handler
+/// and the removal path cannot disagree about the fail-closed signal.
+fn removal_error(error: &std::io::Error) -> ApiError {
+    if error.kind() == ErrorKind::PermissionDenied {
+        ApiError::unavailable(
+            "The shared directory is not writable; file deletion requires a writable mount.",
+        )
+    } else {
+        not_found_or_unavailable(error, "The requested file could not be found.")
     }
 }
 
@@ -565,6 +581,17 @@ fn classify_entry(meta: &fs::Metadata) -> EntryKind {
         EntryKind::Directory
     } else {
         EntryKind::File
+    }
+}
+
+/// The listing's deterministic order: directories first, then case-insensitive
+/// by name (alpha.txt precedes Bravo.txt, which a byte-wise comparison would
+/// reverse). A named function so the comparator's every arm is testable.
+fn entry_order(left: &DirectoryEntry, right: &DirectoryEntry) -> std::cmp::Ordering {
+    match (&left.kind, &right.kind) {
+        (EntryKind::Directory, EntryKind::File) => std::cmp::Ordering::Less,
+        (EntryKind::File, EntryKind::Directory) => std::cmp::Ordering::Greater,
+        _ => left.name.to_lowercase().cmp(&right.name.to_lowercase()),
     }
 }
 
@@ -811,7 +838,10 @@ fn if_range_matches(
         return false;
     };
     let mtime: DateTime<Utc> = modified.into();
-    DateTime::parse_from_str(value, "%a, %d %b %Y %H:%M:%S GMT")
+    // RFC 1123 dates end in the GMT zone designator, which RFC 2822 parsing
+    // accepts as UTC; parsing the date with the format string alone fails
+    // because the offset is ambiguous, so the date form would never match.
+    DateTime::parse_from_rfc2822(value)
         .map(|parsed| parsed.timestamp() == mtime.timestamp())
         .unwrap_or(false)
 }
@@ -1108,11 +1138,7 @@ async fn directory(
         });
     }
 
-    entries.sort_by(|left, right| match (&left.kind, &right.kind) {
-        (EntryKind::Directory, EntryKind::File) => std::cmp::Ordering::Less,
-        (EntryKind::File, EntryKind::Directory) => std::cmp::Ordering::Greater,
-        _ => left.name.to_lowercase().cmp(&right.name.to_lowercase()),
-    });
+    entries.sort_by(entry_order);
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -1158,14 +1184,10 @@ async fn delete_file(
 
     // The Disabled test state reaches the handler without an access context:
     // no enforcement applies and the pre-access behavior (no access control)
-    // is preserved. Production always has the access block.
+    // is preserved. Production always has the access block, and the gate
+    // answers 404 for hidden paths before the handler runs, so the handler
+    // enforces only the delete capability the gate does not evaluate.
     if let Some(context) = access_context.as_ref() {
-        // Hidden paths answer 404 like nonexistent paths: no existence leak.
-        if !access::is_path_visible(context.access(), &context.groups, &relative) {
-            return Err(ApiError::not_found(
-                "The requested file could not be found.",
-            ));
-        }
         // A visible file the user may not delete: 403. The user can already
         // see the file (the listing shows it), so this leaks nothing new.
         if !access::can_delete(context.access(), &context.groups, &relative) {
@@ -1217,18 +1239,10 @@ async fn delete_file(
     }
 
     tokio::fs::remove_file(&target).await.map_err(|error| {
-        if error.kind() == ErrorKind::PermissionDenied {
-            // The fail-closed signal for a read-only mount. The message is a
-            // fixed string that names no host path: naming the directory
-            // would leak it, and the operator knows the shared root from
-            // config.
-            ApiError::unavailable(
-                "The shared directory is not writable; file deletion requires a writable mount.",
-            )
-        } else {
-            // A concurrent delete removed the file first.
-            not_found_or_unavailable(&error, "The requested file could not be found.")
-        }
+        // The fail-closed signal for a read-only mount and the shared mapping
+        // for everything else live in removal_error, so the message is fixed
+        // in one place and names no host path.
+        removal_error(&error)
     })?;
 
     Ok(StatusCode::NO_CONTENT.into_response())
@@ -1528,19 +1542,26 @@ async fn frontend_asset(OriginalUri(uri): OriginalUri) -> Response {
         request_path
     };
 
-    if let Some(response) = embedded_asset_response(path) {
-        return response;
-    }
+    resolve_frontend_asset(path, embedded_asset_response)
+}
 
-    if let Some(response) = embedded_asset_response("index.html") {
-        return response;
-    }
-
-    (
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Frontend assets are unavailable.",
-    )
-        .into_response()
+/// The frontend asset fallback chain: the literal embedded asset first, the
+/// SPA's index.html as the fallback so the router can render its own view, and
+/// the shared 503 when no assets are embedded at all (a broken deployment).
+/// The lookup is accepted as a parameter: the seam is internal, with the
+/// production adapter reading the embedded assets and the test adapter
+/// returning nothing, so the 503 fallback is testable without a deployment
+/// state the tests cannot control.
+fn resolve_frontend_asset(path: &str, lookup: impl Fn(&str) -> Option<Response>) -> Response {
+    lookup(path)
+        .or_else(|| lookup("index.html"))
+        .unwrap_or_else(|| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Frontend assets are unavailable.",
+            )
+                .into_response()
+        })
 }
 
 pub fn app_router() -> Router {
@@ -1593,15 +1614,18 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use axum::http::StatusCode;
+    use axum::response::IntoResponse;
     use tempfile::TempDir;
 
     use super::{
-        ByteRange, OIDC_SESSION_KEY_TOO_SHORT_ERROR, OidcConfigFile, RangeDecision,
-        compute_weak_etag, content_disposition_value, content_response_headers, ensure_within_root,
-        etag_matches_weakly, if_none_match_matches, load_app_config, modified_to_iso,
-        open_download_target, parse_config_file, parse_single_byte_range,
-        percent_decode_relative_path, percent_encode_entry_name, percent_encode_ext_value,
-        users_me_response, validate_relative_path,
+        ByteRange, DirectoryEntry, EntryKind, OIDC_SESSION_KEY_TOO_SHORT_ERROR, OidcConfigFile,
+        RangeDecision, canonical_entry_target, compute_weak_etag, content_disposition_value,
+        content_response_headers, ensure_within_root, entry_metadata, entry_order,
+        etag_matches_weakly, if_none_match_matches, if_range_matches, is_loopback_host,
+        load_app_config, modified_to_iso, open_download_target, parent_path, parse_config_file,
+        parse_single_byte_range, percent_decode_relative_path, percent_encode_entry_name,
+        percent_encode_ext_value, removal_error, resolve_frontend_asset, users_me_response,
+        validate_relative_path,
     };
 
     /// The users/me response is a pure function of the identity extension: a
@@ -1619,6 +1643,26 @@ mod tests {
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
+    /// An empty display name falls back to the subject; an empty email claim
+    /// renders as null instead of an empty string.
+    #[tokio::test]
+    async fn users_me_response_falls_back_from_empty_claims() {
+        let claims = crate::auth::SessionClaims {
+            subject: "fallback-subject".to_string(),
+            display_name: String::new(),
+            email: String::new(),
+            groups: Vec::new(),
+        };
+        let response = users_me_response(Some(&claims));
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(json["displayName"], "fallback-subject");
+        assert!(json["email"].is_null());
+    }
+
     #[test]
     fn missing_shared_root_names_the_directory_and_the_fix() {
         let temp = TempDir::new().expect("temp dir");
@@ -1634,6 +1678,15 @@ mod tests {
 
         assert!(error.contains("does not exist"));
         assert!(error.contains(missing_root.display().to_string().as_str()));
+    }
+
+    /// A config file that cannot be read at all (nonexistent path) is
+    /// reported as unreadable, the startup-abort message.
+    #[test]
+    fn a_missing_config_file_is_reported_as_unreadable() {
+        let error = load_app_config(Path::new("/nonexistent/yafm/config.yaml"))
+            .expect_err("a missing config file should fail");
+        assert_eq!(error, "Configuration file could not be read");
     }
 
     #[test]
@@ -2259,6 +2312,29 @@ mod tests {
         assert_eq!(error.status(), StatusCode::NOT_FOUND);
     }
 
+    /// An unreadable parent (no exec bit) makes the pre-open metadata read
+    /// fail with PermissionDenied, not NotFound: the shared unavailable
+    /// shape is served and no host path leaks.
+    #[tokio::test]
+    async fn open_download_target_answers_503_for_an_unreadable_parent() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().expect("temp dir");
+        let blocked = temp.path().join("blocked");
+        let child = blocked.join("child.bin");
+        fs::create_dir_all(&blocked).expect("create blocked");
+        fs::write(&child, "data").expect("write child");
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000)).expect("set permissions");
+
+        let error = open_download_target(&child)
+            .await
+            .expect_err("an unreadable parent should fail");
+        assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        // Restore so the temp dir cleanup can remove the tree.
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o755)).expect("set permissions");
+    }
+
     #[test]
     fn parse_single_byte_range_covers_open_ended_bounded_and_suffix_forms() {
         assert_eq!(
@@ -2320,6 +2396,17 @@ mod tests {
         assert_eq!(parse_single_byte_range("bytes=", 10), RangeDecision::Full);
         assert_eq!(
             parse_single_byte_range("bytes=0-4,10-20", 10),
+            RangeDecision::Full
+        );
+        // A value without a unit and suffixes that are not numbers are
+        // ignored (Full), not rejected.
+        assert_eq!(parse_single_byte_range("foo", 10), RangeDecision::Full);
+        assert_eq!(
+            parse_single_byte_range("bytes=-abc", 10),
+            RangeDecision::Full
+        );
+        assert_eq!(
+            parse_single_byte_range("bytes=x-5", 10),
             RangeDecision::Full
         );
     }
@@ -2385,6 +2472,209 @@ mod tests {
         assert!(
             percent_decode_relative_path("safe%2Fname.txt").is_err(),
             "double-encoded slash in a name must be rejected"
+        );
+    }
+
+    #[test]
+    fn parent_path_walks_one_level_up_and_names_the_root_parent() {
+        assert_eq!(parent_path("docs/sub"), Some("docs".to_string()));
+        // A name with no slash sits directly in the root: the parent is the
+        // root itself, rendered as an empty relative path.
+        assert_eq!(parent_path("docs"), Some(String::new()));
+        assert_eq!(parent_path(""), None);
+    }
+
+    #[test]
+    fn entry_order_puts_directories_first_then_sorts_names_case_insensitively() {
+        let file = |name: &str| DirectoryEntry {
+            name: name.to_string(),
+            kind: EntryKind::File,
+            can_delete: false,
+            size_bytes: Some(1),
+            modified_at: None,
+        };
+        let directory = |name: &str| DirectoryEntry {
+            name: name.to_string(),
+            kind: EntryKind::Directory,
+            can_delete: false,
+            size_bytes: None,
+            modified_at: None,
+        };
+
+        assert_eq!(
+            entry_order(&directory("z"), &file("a")),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            entry_order(&file("a"), &directory("z")),
+            std::cmp::Ordering::Greater
+        );
+        assert_eq!(
+            entry_order(&file("alpha.txt"), &file("Bravo.txt")),
+            std::cmp::Ordering::Less
+        );
+    }
+
+    #[test]
+    fn a_shared_root_pointing_at_a_file_is_refused() {
+        let temp = TempDir::new().expect("temp dir");
+        let file_root = temp.path().join("not-a-directory");
+        fs::write(&file_root, "data").expect("write file");
+        let config_path = temp.path().join("config.yaml");
+        fs::write(
+            &config_path,
+            format!("sharedRoot: {}\n", file_root.display()),
+        )
+        .expect("write config");
+
+        let error = load_app_config(&config_path).expect_err("a file sharedRoot should fail");
+
+        assert!(error.contains("must be a directory"));
+        assert!(error.contains(file_root.display().to_string().as_str()));
+    }
+
+    #[test]
+    fn an_issuer_with_an_unsupported_url_scheme_is_refused() {
+        let temp = TempDir::new().expect("temp dir");
+        let config_path = write_oidc_config(
+            &temp,
+            "oidc:\n  issuer: ftp://localhost/application/o/yafm/\n  clientId: yafm-spa\n  clientSecret: secret\n  redirectUri: http://127.0.0.1:8080/api/v1/auth/callback\n  cookieSecure: false\n",
+        );
+
+        let error = load_app_config(&config_path).expect_err("an ftp issuer should fail");
+
+        assert!(error.contains("must be an https URL"));
+    }
+
+    /// The entry metadata resolver: the percent-decoded fallback resolves a
+    /// listed encoded name back to its file, and a non-NotFound filesystem
+    /// error maps onto the shared 503 shape.
+    #[tokio::test]
+    async fn entry_metadata_decodes_encoded_names_and_maps_errors() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().expect("temp dir");
+        let parent = temp.path().join("share");
+        fs::create_dir_all(&parent).expect("create parent");
+
+        // The literal name wins when it exists.
+        fs::write(parent.join("literal.txt"), "a").expect("write literal");
+        let (target, meta) = entry_metadata(&parent, "literal.txt", "not found")
+            .await
+            .expect("literal metadata");
+        assert!(meta.is_file());
+        assert_eq!(target, parent.join("literal.txt"));
+
+        // The percent-decoded form is tried when the literal form is absent:
+        // the name listed as %C3%A9 resolves back to the original bytes.
+        let decoded_name = std::ffi::OsStr::from_bytes(&[0xC3, 0xA9]);
+        fs::write(parent.join(decoded_name), "b").expect("write decoded name");
+        let (target, meta) = entry_metadata(&parent, "%C3%A9", "not found")
+            .await
+            .expect("decoded metadata");
+        assert!(meta.is_file());
+        assert_eq!(target, parent.join(decoded_name));
+
+        // A filesystem error that is not NotFound maps onto the shared 503:
+        // an unreadable parent (no exec bit) makes the metadata read fail with
+        // PermissionDenied, not NotFound.
+        let blocked = temp.path().join("blocked");
+        let blocked_child = blocked.join("child.txt");
+        fs::create_dir_all(&blocked).expect("create blocked");
+        fs::write(&blocked_child, "c").expect("write child");
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000)).expect("set permissions");
+        let error = entry_metadata(&blocked, "child.txt", "not found")
+            .await
+            .expect_err("an unreadable parent should fail");
+        assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        // The same fail-closed mapping for the canonical target resolver: an
+        // unreadable root makes the canonicalize fail with PermissionDenied,
+        // not NotFound, and the 503 shape is served.
+        let error = canonical_entry_target(&blocked, "child.txt", "not found")
+            .await
+            .expect_err("an unreadable root should fail");
+        assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        // Restore so the temp dir cleanup can remove the tree.
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o755)).expect("set permissions");
+    }
+
+    /// The `If-Range` HTTP-date form: a date matching the file's mtime at
+    /// second resolution serves the range, a different date does not.
+    #[test]
+    fn if_range_matches_the_http_date_form_at_second_resolution() {
+        let mtime = std::time::SystemTime::UNIX_EPOCH
+            .checked_add(std::time::Duration::from_secs(1_700_000_000))
+            .expect("a valid timestamp");
+        let matching = "Tue, 14 Nov 2023 22:13:20 GMT";
+        let different = "Wed, 15 Nov 2023 00:00:00 GMT";
+
+        assert!(if_range_matches(matching, None, Some(mtime)));
+        assert!(!if_range_matches(different, None, Some(mtime)));
+        // An unrecognized date never serves the range.
+        assert!(!if_range_matches("not-a-date", None, Some(mtime)));
+        // An absent mtime never serves the range either: the handler always
+        // passes the file's mtime, so this is the fail-closed side.
+        assert!(!if_range_matches(matching, None, None));
+    }
+
+    #[test]
+    fn a_url_without_a_host_is_never_loopback() {
+        // The http scheme always carries a host, so the None arm is the
+        // fail-closed side the caller never sees in production.
+        assert!(!is_loopback_host(None));
+    }
+
+    #[test]
+    fn removal_error_maps_permission_denial_and_the_shared_mapping() {
+        // The fail-closed signal for a read-only mount: a fixed message that
+        // names no host path.
+        let error = std::io::Error::from_raw_os_error(13); // EACCES
+        assert_eq!(
+            removal_error(&error).status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+
+        // A filesystem error that is neither PermissionDenied nor NotFound
+        // falls back to the shared 503 shape.
+        let error = std::io::Error::from_raw_os_error(30); // EROFS
+        assert_eq!(
+            removal_error(&error).status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+
+        // A NotFound (a concurrent delete removed the file first) becomes the
+        // caller's not-found message.
+        let error = std::io::Error::new(std::io::ErrorKind::NotFound, "gone");
+        assert_eq!(removal_error(&error).status(), StatusCode::NOT_FOUND);
+    }
+
+    /// The fallback chain: a lookup with nothing returns the shared 503, the
+    /// literal asset wins when the lookup has it, and index.html is the SPA
+    /// fallback for unknown non-API paths.
+    #[test]
+    fn resolve_frontend_asset_chains_the_literal_asset_index_and_the_503() {
+        let response = resolve_frontend_asset("index.css", |_| None);
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let literal =
+            |path: &str| (path == "index.css").then(|| (StatusCode::OK, "css").into_response());
+        assert_eq!(
+            resolve_frontend_asset("index.css", literal).status(),
+            StatusCode::OK
+        );
+
+        let index_only = |path: &str| {
+            if path == "index.html" {
+                Some((StatusCode::OK, "spa").into_response())
+            } else {
+                None
+            }
+        };
+        assert_eq!(
+            resolve_frontend_asset("index.css", index_only).status(),
+            StatusCode::OK
         );
     }
 }

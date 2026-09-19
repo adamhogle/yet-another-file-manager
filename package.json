@@ -17,6 +17,8 @@
     "frontend:build": "cd frontend && npm run build",
     "backend:check": "cd backend && cargo check",
     "backend:test": "cd backend && cargo test",
+    "backend:coverage": "cd backend && cargo llvm-cov --lib --tests --ignore-filename-regex 'src/(main\\.rs|bin/)' --fail-under-lines 99 --json --output-path target/llvm-cov/coverage.json --summary-only",
+    "backend:coverage:baseline": "node scripts/check-coverage-baseline.mjs",
     "backend:dev": "npm run frontend:build && cd backend && cargo run --bin backend -- ../config/yafm.config.yaml",
     "backend:build": "npm run frontend:build && cd backend && cargo build --release --bin backend",
     "frontend:dev": "cd frontend && npm run dev",

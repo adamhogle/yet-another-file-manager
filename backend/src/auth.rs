@@ -435,9 +435,10 @@ fn decode_claim(value: &str) -> Result<String, String> {
 /// empty.
 fn parse_session_payload(value: &str) -> Result<SessionClaims, String> {
     let mut fields = value.splitn(6, SESSION_FIELD_SEPARATOR);
-    let version = fields
-        .next()
-        .ok_or_else(|| "The session cookie is not recognizable.".to_string())?;
+    // The splitn iterator always yields at least one field (the whole string
+    // when no separator is present), so the version is never missing; an
+    // empty or foreign version fails the comparison below.
+    let version = fields.next().unwrap_or_default();
     let expiration = fields
         .next()
         .ok_or_else(|| "The session cookie is not recognizable.".to_string())?;
@@ -1597,6 +1598,42 @@ mod tests {
             .err() // SessionClaims has no Debug, so expect_err is not available.
             .expect("a non-UTF-8 subject must be rejected");
         assert_eq!(error, "The session cookie is not recognizable.");
+
+        // A payload shorter than six fields is rejected at the first missing
+        // field: the subject exists, so the display name, email and groups
+        // are each reported as missing when absent.
+        let error = parse_session_payload("v2:9999999999:subject")
+            .err() // SessionClaims has no Debug, so expect_err is not available.
+            .expect("a payload missing the display name must be rejected");
+        assert_eq!(error, "The session cookie is not recognizable.");
+
+        let error = parse_session_payload("v2:9999999999:subject:display")
+            .err() // SessionClaims has no Debug, so expect_err is not available.
+            .expect("a payload missing the email must be rejected");
+        assert_eq!(error, "The session cookie is not recognizable.");
+
+        let error = parse_session_payload("v2:9999999999:subject:display:email")
+            .err() // SessionClaims has no Debug, so expect_err is not available.
+            .expect("a payload missing the groups must be rejected");
+        assert_eq!(error, "The session cookie is not recognizable.");
+
+        // The optional claim fields decode individually: an invalid percent
+        // escape in the display name, the email, or a group entry rejects the
+        // payload.
+        let error = parse_session_payload("v2:9999999999:subject:%FF:email:groups")
+            .err() // SessionClaims has no Debug, so expect_err is not available.
+            .expect("a non-UTF-8 display name must be rejected");
+        assert_eq!(error, "The session cookie is not recognizable.");
+
+        let error = parse_session_payload("v2:9999999999:subject:display:%FF:groups")
+            .err() // SessionClaims has no Debug, so expect_err is not available.
+            .expect("a non-UTF-8 email must be rejected");
+        assert_eq!(error, "The session cookie is not recognizable.");
+
+        let error = parse_session_payload("v2:9999999999:subject:display:email:%FF")
+            .err() // SessionClaims has no Debug, so expect_err is not available.
+            .expect("a non-UTF-8 group entry must be rejected");
+        assert_eq!(error, "The session cookie is not recognizable.");
     }
 
     /// The identity fields round-trip exactly through the percent-encoding: a
@@ -1693,39 +1730,76 @@ mod tests {
     }
 
     /// The display-name fallback chain: no preferred_username falls back to
-    /// `name` (the untagged value first), then to `email`, then to empty.
+    /// `name` (the untagged value first, then the first localized value),
+    /// then to `email`, then to empty.
     #[test]
     fn the_display_name_falls_back_to_name_then_email() {
-        let base = |preferred: Option<String>, name: Option<String>| {
-            let mut standard = openidconnect::StandardClaims::new(
-                openidconnect::SubjectIdentifier::new("sub".to_string()),
-            );
-            standard =
-                standard.set_preferred_username(preferred.map(openidconnect::EndUserUsername::new));
-            standard = standard.set_name(name.map(|value| {
-                openidconnect::LocalizedClaim::from(openidconnect::EndUserName::new(value))
-            }));
-            standard = standard.set_email(Some(openidconnect::EndUserEmail::new(
-                "alice@example.com".to_string(),
-            )));
-            IdTokenClaims::new(
-                IssuerUrl::new(TEST_ISSUER.to_string()).expect("a valid issuer URL"),
-                vec![openidconnect::Audience::new("aud".to_string())],
-                chrono::Utc::now() + chrono::Duration::hours(1),
-                chrono::Utc::now(),
-                standard,
-                ExtraIdTokenClaims { groups: None },
-            )
-        };
+        let base =
+            |preferred: Option<String>,
+             name: Option<openidconnect::LocalizedClaim<openidconnect::EndUserName>>| {
+                let mut standard = openidconnect::StandardClaims::new(
+                    openidconnect::SubjectIdentifier::new("sub".to_string()),
+                );
+                standard = standard
+                    .set_preferred_username(preferred.map(openidconnect::EndUserUsername::new));
+                standard = standard.set_name(name);
+                standard = standard.set_email(Some(openidconnect::EndUserEmail::new(
+                    "alice@example.com".to_string(),
+                )));
+                IdTokenClaims::new(
+                    IssuerUrl::new(TEST_ISSUER.to_string()).expect("a valid issuer URL"),
+                    vec![openidconnect::Audience::new("aud".to_string())],
+                    chrono::Utc::now() + chrono::Duration::hours(1),
+                    chrono::Utc::now(),
+                    standard,
+                    ExtraIdTokenClaims { groups: None },
+                )
+            };
 
-        let session = session_claims_from_id_token(&base(None, Some("Alice Name".to_string())));
+        let session = session_claims_from_id_token(&base(
+            None,
+            Some(openidconnect::LocalizedClaim::from(
+                openidconnect::EndUserName::new("Alice Name".to_string()),
+            )),
+        ));
         assert_eq!(session.display_name, "Alice Name");
+
+        // A name that carries only a language-tagged value: the untagged
+        // lookup misses and the first localized value becomes the display
+        // name (a single localized entry keeps the fallback deterministic).
+        let mut localized_only = openidconnect::LocalizedClaim::new();
+        localized_only.insert(
+            Some(openidconnect::LanguageTag::new("de".to_string())),
+            openidconnect::EndUserName::new("German Name".to_string()),
+        );
+        let session = session_claims_from_id_token(&base(None, Some(localized_only)));
+        assert_eq!(session.display_name, "German Name");
 
         // No preferred_username and no name: the email becomes the display
         // name.
         let session = session_claims_from_id_token(&base(None, None));
         assert_eq!(session.display_name, "alice@example.com");
         assert_eq!(session.email, "alice@example.com");
+    }
+
+    /// The callback's code extraction: a missing `code` query parameter is
+    /// the untrustworthy-flow shape (401), a present one is passed through.
+    #[test]
+    fn a_callback_without_a_code_is_the_untrustworthy_flow() {
+        let query = CallbackQuery {
+            code: None,
+            state: Some("state".to_string()),
+        };
+        assert!(matches!(
+            callback_code(&query).unwrap_err(),
+            AuthFlowError::Unauthorized
+        ));
+
+        let query = CallbackQuery {
+            code: Some("the-code".to_string()),
+            state: Some("state".to_string()),
+        };
+        assert_eq!(callback_code(&query).unwrap(), "the-code");
     }
 
     #[test]
@@ -1812,6 +1886,53 @@ mod tests {
             jar.verify_login(&forged).is_err(),
             "a cookie signed with a different signing key must be rejected"
         );
+    }
+
+    #[test]
+    fn a_login_cookie_with_empty_fields_is_not_recognizable() {
+        let jar = SessionCookieJar::new(Some(TEST_SIGNING_KEY), false);
+        let cookie = jar
+            .mint_login(LoginCookieData {
+                state: String::new(),
+                nonce: String::new(),
+                verifier: String::new(),
+                return_to: "/".to_string(),
+            })
+            .encoded()
+            .stripped()
+            .to_string();
+        let error = jar
+            .verify_login(&cookie)
+            .expect_err("a cookie with empty fields must be rejected");
+        assert!(error.contains("not recognizable"));
+    }
+
+    #[test]
+    fn an_oversized_session_cookie_is_still_minted_with_a_budget_warning() {
+        let jar = SessionCookieJar::new(Some(TEST_SIGNING_KEY), false);
+        // ~7 KB of encoded groups push the cookie over the 4093-byte budget:
+        // the mint succeeds and the budget warning is logged for operators
+        // instead of the drop happening unnoticed. The warning is emitted
+        // through a scoped dispatcher so the log call actually executes: the
+        // test runtime has no global subscriber, under which the log body is
+        // skipped before it runs.
+        let subscriber = tracing_subscriber::fmt().finish();
+        tracing::subscriber::with_default(subscriber, || {
+            let groups: Vec<String> = (0..300)
+                .map(|index| format!("group-{index:03}-long-name"))
+                .collect();
+            let claims = SessionClaims {
+                subject: "budget-subject".to_string(),
+                display_name: "Budget Test".to_string(),
+                email: "budget@example.com".to_string(),
+                groups,
+            };
+            let minted = jar.mint_session(SESSION_MAX_AGE_SECONDS, &claims);
+            assert!(
+                minted.encoded().stripped().to_string().len() > SESSION_COOKIE_BUDGET_BYTES,
+                "the test cookie must actually exceed the budget"
+            );
+        });
     }
 
     #[test]

@@ -183,6 +183,14 @@ struct MockIdpState {
     signing_key: Mutex<CoreRsaPrivateSigningKey>,
     issuer: String,
     codes: Mutex<MockIdpCodes>,
+    /// When set, the mock issues ID tokens with an audience that does not
+    /// match the backend's client id: a genuine (non-retryable) claim
+    /// rejection, the claim-validation failure arm the refresh path must not
+    /// retry.
+    reject_claims: Mutex<bool>,
+    /// When set, the mock's token response carries no ID token at all: a
+    /// misbehaving provider whose token response cannot be authenticated.
+    omit_id_token: Mutex<bool>,
 }
 
 /// The authorization codes handed out by the authorize stub, keyed by the code
@@ -222,6 +230,8 @@ fn start_mock_idp() -> MockIdp {
         ),
         issuer: issuer.clone(),
         codes: Mutex::new(MockIdpCodes::default()),
+        reject_claims: Mutex::new(false),
+        omit_id_token: Mutex::new(false),
     });
     let state_for_router = state.clone();
     tokio::spawn(async move {
@@ -380,8 +390,16 @@ async fn mock_token(
     let claims = CoreIdTokenClaims::new(
         IssuerUrl::new(state.issuer.clone()).expect("a valid issuer URL"),
         // The audience is the client id; the backend's verifier rejects the
-        // token unless it matches.
-        vec![Audience::new(TEST_CLIENT_ID.to_string())],
+        // token unless it matches. With the reject flag set the audience is
+        // deliberately wrong: a genuine claim rejection the refresh path does
+        // not retry.
+        vec![Audience::new(
+            if *state.reject_claims.lock().expect("lock the reject flag") {
+                "wrong-client-id".to_string()
+            } else {
+                TEST_CLIENT_ID.to_string()
+            },
+        )],
         // ID token expiration: shorter than the session, like a real provider.
         Utc::now() + Duration::seconds(300),
         Utc::now(),
@@ -393,21 +411,25 @@ async fn mock_token(
     // deliberately NOT set: the backend does not validate it (authentik
     // defaults it to false since 2025.10).
     let claims = claims.set_nonce(Some(Nonce::new(issued.nonce)));
-    let id_token = {
+    let id_token = if *state.omit_id_token.lock().expect("lock the omit flag") {
+        None
+    } else {
         let signing_key = state.signing_key.lock().expect("lock the mock signing key");
-        CoreIdToken::new(
-            claims,
-            &*signing_key,
-            CoreJwsSigningAlgorithm::RsaSsaPkcs1V15Sha256,
-            None,
-            None,
+        Some(
+            CoreIdToken::new(
+                claims,
+                &*signing_key,
+                CoreJwsSigningAlgorithm::RsaSsaPkcs1V15Sha256,
+                None,
+                None,
+            )
+            .expect("the mock IdP signs the ID token"),
         )
-        .expect("the mock IdP signs the ID token")
     };
     axum::Json(CoreTokenResponse::new(
         AccessToken::new("mock-access-token".to_string()),
         CoreTokenType::Bearer,
-        CoreIdTokenFields::new(Some(id_token), EmptyExtraTokenFields {}),
+        CoreIdTokenFields::new(id_token, EmptyExtraTokenFields {}),
     ))
     .into_response()
 }
@@ -757,5 +779,151 @@ async fn the_full_oidc_flow_mints_a_session_and_closes_the_loop() {
     assert!(
         !session_cookie.is_empty(),
         "step 7: the refreshed callback issues a session cookie"
+    );
+
+    // 8. A genuine (non-retryable) claim rejection: the mock issues an ID
+    //    token whose audience does not match the backend's client id. The
+    //    claim check fails with a non-retryable error (no signing-key
+    //    rotation involved), so the refresh path must not retry and the
+    //    callback answers 401 without minting a session.
+    *mock
+        .state
+        .reject_claims
+        .lock()
+        .expect("lock the reject flag") = true;
+
+    let response = get_backend(&app, backend::auth::LOGIN_PATH, None).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::FOUND,
+        "step 8: the login endpoint redirects to the provider"
+    );
+    let authorize_location = location_header(response.headers());
+    let login_cookie = cookie_header_value(&response, backend::auth::LOGIN_COOKIE_NAME);
+    assert!(
+        !login_cookie.is_empty(),
+        "step 8: the login endpoint sets the login cookie"
+    );
+
+    let mock_response = mock_get(&authorize_location).await;
+    assert_eq!(
+        mock_response.status(),
+        StatusCode::FOUND,
+        "step 8: the mock accepts the authorization request and issues a code"
+    );
+    let callback_location = location_header(mock_response.headers());
+    let code = query_parameter(&callback_location, "code")
+        .expect("step 8: the mock's redirect carries the code");
+    let state = query_parameter(&authorize_location, "state")
+        .expect("step 8: the authorize URL carries the state");
+
+    let callback_path = format!("/api/v1/auth/callback?code={code}&state={state}");
+    let response = get_backend(&app, &callback_path, Some(&login_cookie)).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "step 8: the callback rejects the bad-audience token without minting a session"
+    );
+    let set_cookies = set_cookie_headers(&response);
+    assert!(
+        !set_cookies.contains("yafm_session="),
+        "step 8: no session is minted for a rejected token: {set_cookies}"
+    );
+
+    // 9. A replayed authorization code: the callback is invoked with a code
+    //    the mock already consumed. The token endpoint answers 400 (codes
+    //    are single-use), the token request fails, and the callback answers
+    //    the provider-unavailable shape without minting a session.
+    let replayed_code = code; // step 8's consumed code
+    *mock
+        .state
+        .reject_claims
+        .lock()
+        .expect("lock the reject flag") = false;
+
+    let response = get_backend(&app, backend::auth::LOGIN_PATH, None).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::FOUND,
+        "step 9: the login endpoint redirects to the provider"
+    );
+    let authorize_location = location_header(response.headers());
+    let login_cookie = cookie_header_value(&response, backend::auth::LOGIN_COOKIE_NAME);
+    assert!(
+        !login_cookie.is_empty(),
+        "step 9: the login endpoint sets the login cookie"
+    );
+
+    let mock_response = mock_get(&authorize_location).await;
+    assert_eq!(
+        mock_response.status(),
+        StatusCode::FOUND,
+        "step 9: the mock accepts the authorization request and issues a code"
+    );
+    let callback_location = location_header(mock_response.headers());
+    let state = query_parameter(&authorize_location, "state")
+        .expect("step 9: the authorize URL carries the state");
+    assert_eq!(
+        query_parameter(&callback_location, "state"),
+        Some(state.clone()),
+        "step 9: the mock echoes the state back"
+    );
+
+    // The callback carries the consumed code from step 8 against a fresh
+    // login cookie: the state matches, the token request does not.
+    let callback_path = format!("/api/v1/auth/callback?code={replayed_code}&state={state}");
+    let response = get_backend(&app, &callback_path, Some(&login_cookie)).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "step 9: a replayed code answers the provider-unavailable shape without minting a session"
+    );
+    let set_cookies = set_cookie_headers(&response);
+    assert!(
+        !set_cookies.contains("yafm_session="),
+        "step 9: no session is minted for a replayed code: {set_cookies}"
+    );
+
+    // 10. A misbehaving provider: the token response carries no ID token at
+    //     all. The callback cannot authenticate without one and answers 401
+    //     without minting a session.
+    *mock.state.omit_id_token.lock().expect("lock the omit flag") = true;
+
+    let response = get_backend(&app, backend::auth::LOGIN_PATH, None).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::FOUND,
+        "step 10: the login endpoint redirects to the provider"
+    );
+    let authorize_location = location_header(response.headers());
+    let login_cookie = cookie_header_value(&response, backend::auth::LOGIN_COOKIE_NAME);
+    assert!(
+        !login_cookie.is_empty(),
+        "step 10: the login endpoint sets the login cookie"
+    );
+
+    let mock_response = mock_get(&authorize_location).await;
+    assert_eq!(
+        mock_response.status(),
+        StatusCode::FOUND,
+        "step 10: the mock accepts the authorization request and issues a code"
+    );
+    let callback_location = location_header(mock_response.headers());
+    let code = query_parameter(&callback_location, "code")
+        .expect("step 10: the mock's redirect carries the code");
+    let state = query_parameter(&authorize_location, "state")
+        .expect("step 10: the authorize URL carries the state");
+
+    let callback_path = format!("/api/v1/auth/callback?code={code}&state={state}");
+    let response = get_backend(&app, &callback_path, Some(&login_cookie)).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "step 10: a token response without an ID token is rejected without minting a session"
+    );
+    let set_cookies = set_cookie_headers(&response);
+    assert!(
+        !set_cookies.contains("yafm_session="),
+        "step 10: no session is minted without an ID token: {set_cookies}"
     );
 }
