@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Done (2026-09-19)
 
 ## Summary
 
@@ -62,8 +62,8 @@ failed login and each file download, so that I can audit who did what and when.
   with target `yafm::access`.
 - `backend/src/main.rs` switches the serve call to
   `into_make_service_with_connect_info::<SocketAddr>()` so handlers can read
-  the peer socket. Handlers use `Option<ConnectInfo<SocketAddr>>` so existing
-  router tests, which use `oneshot` without connect info, still pass.
+  the peer socket. Handlers read it as `Option<Extension<ConnectInfo<SocketAddr>>>`
+  so existing router tests, which use `oneshot` without connect info, still pass.
 - `backend/src/lib.rs` adds the `trustProxy` config flag (default `false`) to
   the config parse and an `AppConfig` field plus a `get_trust_proxy()` getter.
 - Login success is logged inside `callback_response` (where the session
@@ -72,6 +72,10 @@ failed login and each file download, so that I can audit who did what and when.
 - The download handler is wrapped in `download_inner`; the wrapper derives the
   status and bytes (from `Content-Length` on 200/206) from the outcome and
   logs once per request.
+- Every user-controlled field (client IP, user, requested path, referer,
+  user agent) is escaped at render time: `"` and `\` render as their escaped
+  form and control characters render as `\xHH`, so a forged `p=foo%0Abar`
+  cannot split the log line.
 
 ## Security Considerations
 
@@ -81,31 +85,37 @@ failed login and each file download, so that I can audit who did what and when.
 - Log lines carry the user display name and the requested relative path; no
   host filesystem path, OIDC client secret, signing key, or `returnTo` is
   logged.
+- Quotes, backslashes and control characters in user-controlled fields are
+  escaped at render time, so a forged path or header cannot inject extra log
+  lines or break the combined-log field quoting.
 - The login failure line carries no user identity because the identity is not
   established when the flow fails.
 
 ## Acceptance Criteria
 
-- [ ] A successful login emits one `LOGIN` line with the user identity and
+- [x] A successful login emits one `LOGIN` line with the user identity and
       status 302.
-- [ ] A failed login (token/state rejection and provider-unavailable) emits
+- [x] A failed login (token/state rejection and provider-unavailable) emits
       one `LOGIN` line with no user and the matching status.
-- [ ] A download emits one line per outcome with the served status and byte
+- [x] A download emits one line per outcome with the served status and byte
       count.
-- [ ] `trustProxy` defaults to `false`; when false, a stray `X-Forwarded-For`
+- [x] `trustProxy` defaults to `false`; when false, a stray `X-Forwarded-For`
       is ignored and the peer IP is logged.
-- [ ] When `trustProxy` is `true`, the left-most `X-Forwarded-For` hop is
+- [x] When `trustProxy` is `true`, the left-most `X-Forwarded-For` hop is
       logged, falling back to the peer IP when the header is absent.
-- [ ] Existing router tests still pass unchanged.
+- [x] Existing router tests still pass unchanged.
 
 ## Test Plan
 
 - Unit: `client_ip` resolution (peer, trusted forwarded, fallback, absent
-  connect info), `user_agent`, and the `format_line` shape
+  connect info), `user_agent`, and the `Line::render` shape
   (`backend/src/access_log.rs`).
 - Unit: the login failure status mapping (401 vs 503).
-- Unit: the download wrapper derives the status and bytes for 200/206/304/416
-  outcomes.
+- Unit: the escaped combined-log shape (control characters and quotes cannot
+  forge a second line).
+- Integration: the download wrapper derives the status and bytes for
+  200/206/304/416 outcomes, and a forged newline in the path renders escaped
+  (`backend/tests/access_log.rs`).
 - Regression: `cargo test --release --lib`, `npm run check`.
 
 ## Open Questions

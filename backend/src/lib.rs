@@ -1262,7 +1262,7 @@ async fn download(
     // 200/206 body) or defaulted to zero for non-body outcomes.
     let client_ip =
         access_log::client_ip(connect_info.as_deref(), &request_headers, get_trust_proxy());
-    let ua = access_log::user_agent(&request_headers);
+    let user_agent = access_log::user_agent(&request_headers);
     let referer = access_log::referer(&request_headers);
     let user = access_log::identity_label(identity.as_deref());
     let raw_path = query.p.clone();
@@ -1287,7 +1287,15 @@ async fn download(
         Err(error) => (error.status(), 0),
     };
 
-    access_log::log_download(&client_ip, &user, &raw_path, status, bytes, &referer, &ua);
+    access_log::log_download(
+        &client_ip,
+        &user,
+        &raw_path,
+        status,
+        bytes,
+        &referer,
+        &user_agent,
+    );
     result
 }
 

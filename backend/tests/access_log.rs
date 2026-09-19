@@ -8,7 +8,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::http::{Request, StatusCode, header};
 use tempfile::TempDir;
 use tower::util::ServiceExt;
 
@@ -72,6 +72,12 @@ async fn downloads_and_logins_emit_nginx_style_access_lines() {
         .await
         .expect("download response");
     assert_eq!(response.status(), StatusCode::OK);
+    let etag = response
+        .headers()
+        .get(header::ETAG)
+        .and_then(|value| value.to_str().ok())
+        .expect("a 200 download carries a weak ETag")
+        .to_string();
 
     // A missing file is a 404 download outcome, also logged.
     let response = app
@@ -85,6 +91,67 @@ async fn downloads_and_logins_emit_nginx_style_access_lines() {
         )
         .await
         .expect("download response");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    // A range request is a 206 outcome with the range length as the byte count.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/download?p=demo.txt")
+                .method("GET")
+                .header(header::RANGE, "bytes=0-1")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("range response");
+    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+
+    // An unsatisfiable range is a 416 download outcome with no body.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/download?p=demo.txt")
+                .method("GET")
+                .header(header::RANGE, "bytes=10-20")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("unsatisfiable range response");
+    assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+
+    // A matching If-None-Match is a 304 download outcome with no body.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/download?p=demo.txt")
+                .method("GET")
+                .header(header::IF_NONE_MATCH, &etag)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("not-modified response");
+    assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+
+    // A forged newline in the path passes validation (it is not a rejected
+    // form) and misses the file lookup, so it is a 404 outcome. The rendered
+    // line escapes it: one access line, no forged second line.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/download?p=a%0Ab")
+                .method("GET")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("forged path response");
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
     // A failed login (auth disabled -> Unavailable 503) emits a LOGIN line.
@@ -116,5 +183,25 @@ async fn downloads_and_logins_emit_nginx_style_access_lines() {
     assert!(
         captured.contains("\"LOGIN\" 503 0"),
         "expected a failed LOGIN line, got:\n{captured}"
+    );
+    assert!(
+        captured.contains("\"DOWNLOAD demo.txt\" 206 2"),
+        "expected a 206 line with the range length, got:\n{captured}"
+    );
+    assert!(
+        captured.contains("\"DOWNLOAD demo.txt\" 416 0"),
+        "expected a 416 line, got:\n{captured}"
+    );
+    assert!(
+        captured.contains("\"DOWNLOAD demo.txt\" 304 0"),
+        "expected a 304 line, got:\n{captured}"
+    );
+    assert!(
+        captured.contains("\"DOWNLOAD a\\x0ab\" 404 0"),
+        "expected the forged newline to render escaped, got:\n{captured}"
+    );
+    assert!(
+        !captured.contains("DOWNLOAD a\nb"),
+        "a forged newline split the access log"
     );
 }

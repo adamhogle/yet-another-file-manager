@@ -8,6 +8,7 @@
 //! `X-Forwarded-For` hop (the client behind a trusted reverse proxy) is
 //! logged, falling back to the peer IP when the header is absent.
 
+use std::fmt::Write as _;
 use std::net::SocketAddr;
 
 use axum::extract::ConnectInfo;
@@ -49,22 +50,23 @@ pub fn client_ip(
     }
 }
 
-/// The `User-Agent` value as sent, or "-" when absent.
-pub fn user_agent(headers: &HeaderMap) -> String {
+/// One header value as sent, or "-" when the header is absent or not UTF-8.
+fn header_or_dash(headers: &HeaderMap, name: header::HeaderName) -> String {
     headers
-        .get(header::USER_AGENT)
+        .get(name)
         .and_then(|value| value.to_str().ok())
         .unwrap_or(UNKNOWN)
         .to_string()
 }
 
+/// The `User-Agent` value as sent, or "-" when absent.
+pub fn user_agent(headers: &HeaderMap) -> String {
+    header_or_dash(headers, header::USER_AGENT)
+}
+
 /// The referer value as sent, or "-" when absent.
 pub fn referer(headers: &HeaderMap) -> String {
-    headers
-        .get(header::REFERER)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or(UNKNOWN)
-        .to_string()
+    header_or_dash(headers, header::REFERER)
 }
 
 /// The user label for a log line: the session display name when present,
@@ -86,6 +88,27 @@ fn emit(line: &str) {
     tracing::info!(target: ACCESS_LOG_TARGET, "{line}");
 }
 
+/// Escapes the characters that would break the combined-log shape: `"` and
+/// `\\` inside a quoted field, and control characters (a newline would forge
+/// extra log lines) as `\\xHH`. Multi-byte UTF-8 passes through, so display
+/// names and paths stay readable.
+fn escape_field(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        let code = character as u32;
+        if character == '"' {
+            escaped.push_str("\\\"");
+        } else if character == '\\' {
+            escaped.push_str("\\\\");
+        } else if code < 0x20 || code == 0x7f {
+            let _ = write!(escaped, "\\x{code:02x}");
+        } else {
+            escaped.push(character);
+        }
+    }
+    escaped
+}
+
 /// The fields of one combined access-log line, in nginx combined-log order:
 /// `ip - user [time] "event" status bytes "referer" "user-agent"`.
 struct Line {
@@ -104,14 +127,14 @@ impl Line {
     fn render(&self, timestamp: &str) -> String {
         format!(
             "{} - {} [{}] \"{}\" {} {} \"{}\" \"{}\"",
-            self.ip,
-            self.user,
+            escape_field(&self.ip),
+            escape_field(&self.user),
             timestamp,
-            self.event,
+            escape_field(&self.event),
             self.status.as_u16(),
             self.bytes,
-            self.referer,
-            self.user_agent
+            escape_field(&self.referer),
+            escape_field(&self.user_agent)
         )
     }
 
@@ -134,20 +157,25 @@ pub fn log_login_success(claims: &SessionClaims, ip: &str, user_agent: &str) {
     .emit();
 }
 
-/// Logs a failed login: no identity is established, so the user is "-". The
-/// status mirrors the HTTP response the callback would return.
-pub fn log_login_failure(error: &AuthFlowError, ip: &str, user_agent: &str) {
-    let status = match error {
+/// The status a failed login is logged with: it mirrors the HTTP response the
+/// callback would return for the same flow error.
+fn login_status(error: &AuthFlowError) -> StatusCode {
+    match error {
         AuthFlowError::Unauthorized => StatusCode::UNAUTHORIZED,
         AuthFlowError::Unavailable | AuthFlowError::ProviderUnavailable => {
             StatusCode::SERVICE_UNAVAILABLE
         }
-    };
+    }
+}
+
+/// Logs a failed login: no identity is established, so the user is "-". The
+/// status mirrors the HTTP response the callback would return.
+pub fn log_login_failure(error: &AuthFlowError, ip: &str, user_agent: &str) {
     Line {
         ip: ip.to_string(),
         user: UNKNOWN.to_string(),
         event: "LOGIN".to_string(),
-        status,
+        status: login_status(error),
         bytes: 0,
         referer: UNKNOWN.to_string(),
         user_agent: user_agent.to_string(),
@@ -299,6 +327,35 @@ mod tests {
     }
 
     #[test]
+    fn control_characters_and_quotes_cannot_forge_log_lines() {
+        let line = Line {
+            ip: "127.0.0.1".to_string(),
+            user: UNKNOWN.to_string(),
+            event: "DOWNLOAD a\nb\"c\\d".to_string(),
+            status: StatusCode::NOT_FOUND,
+            bytes: 0,
+            referer: UNKNOWN.to_string(),
+            user_agent: "curl \"injected\"".to_string(),
+        };
+        let rendered = line.render("2026-01-01T00:00:00Z");
+        // A newline would split the access log into two lines; it renders as
+        // the escaped form instead, and quotes and backslashes stay inside
+        // their quoted fields.
+        assert!(
+            !rendered.contains('\n'),
+            "a control character forged a new log line: {rendered}"
+        );
+        assert!(
+            rendered.contains("DOWNLOAD a\\x0ab\\\"c\\\\d"),
+            "expected escaped control characters and quotes, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("curl \\\"injected\\\""),
+            "expected an escaped user agent, got: {rendered}"
+        );
+    }
+
+    #[test]
     fn login_failure_status_maps_unauthorized_and_provider() {
         let statuses = [
             (&AuthFlowError::Unauthorized, 401),
@@ -310,10 +367,7 @@ mod tests {
                 ip: "203.0.113.7".to_string(),
                 user: UNKNOWN.to_string(),
                 event: "LOGIN".to_string(),
-                status: match error {
-                    AuthFlowError::Unauthorized => StatusCode::UNAUTHORIZED,
-                    _ => StatusCode::SERVICE_UNAVAILABLE,
-                },
+                status: login_status(error),
                 bytes: 0,
                 referer: UNKNOWN.to_string(),
                 user_agent: "-".to_string(),
