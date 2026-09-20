@@ -92,9 +92,9 @@ fn reset_share_tree() {
 
 /// The fixture-lock guard with a fresh share tree: every test takes it as its
 /// first step and holds it for its duration, so the tests are serialized and
-/// the reset cannot race a concurrent reader. Poisoning is collapsed into the
-/// inner guard: a panicking test leaves the lock usable, the reset fixes the
-/// tree, and the next test starts clean.
+/// the reset cannot race a concurrent reader. The async mutex never poisons,
+/// so a panicking test leaves the lock usable, the reset fixes the tree, and
+/// the next test starts clean.
 async fn locked_fixture() -> MutexGuard<'static, ()> {
     let guard = FIXTURE_LOCK.lock().await;
     reset_share_tree();
