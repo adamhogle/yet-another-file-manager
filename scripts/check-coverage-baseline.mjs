@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 const root = path.dirname(fileURLToPath(import.meta.url)) + '/..';
-const reportPath = path.join(root, 'backend/target/llvm-cov/coverage.json');
+const reportPath = path.join(root, 'backend/target/coverage.json');
 const baselinePath = path.join(root, 'backend/coverage-baseline.json');
 
 let report;
@@ -16,7 +16,7 @@ try {
   report = JSON.parse(readFileSync(reportPath, 'utf8'));
 } catch {
   console.error(
-    'No coverage report found at backend/target/llvm-cov/coverage.json. Run `npm run backend:coverage` first.'
+    'No coverage report found at backend/target/coverage.json. Run `npm run backend:coverage` first.'
   );
   process.exit(1);
 }
