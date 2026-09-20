@@ -449,12 +449,12 @@ fn match_from(pattern: &[SegmentMatcher], segments: &[&str], offset: usize) -> b
     }
     let matcher = &pattern[0];
     if matcher.double_star {
-        let minimum_skip = if pattern.len() == 1 { 1 } else { 0 };
+        // A `**` middle segment matches zero or more path segments; a `**`
+        // trailing segment matches one or more. The recursion handles both:
+        // the offset check below already refuses offsets past the path, so
+        // no separate minimum-skip guard is needed.
         let remaining = segments.len() - offset;
-        if remaining < minimum_skip {
-            return false;
-        }
-        for skip in minimum_skip..=remaining {
+        for skip in 0..=remaining {
             if match_from(&pattern[1..], segments, offset + skip) {
                 return true;
             }
@@ -698,6 +698,16 @@ fn verdict_line(relative: &str, decision: &AccessDecision) -> String {
 /// Rules that match nothing (an allow naming a path the walk never evaluates,
 /// or a deny pattern no evaluated path hits) are reported plainly at the end
 /// (ADR-0005 decision 9), so a stale rule cannot hide behind silence.
+/// The message for a directory that becomes unreadable mid-walk. A named
+/// function so the format is testable without an error the walk cannot
+/// fabricate.
+fn unreadable_directory_message(directory: &std::path::Path) -> String {
+    format!(
+        "The shared directory \"{}\" could not be read.",
+        directory.display()
+    )
+}
+
 pub async fn run_access_check(
     shared_root: &Path,
     access: &AccessConfig,
@@ -715,16 +725,13 @@ pub async fn run_access_check(
         let segments = path_segments(&relative);
         let decision = evaluate(access, groups, &segments);
         // Rule usage is tracked against every evaluated path: an allow rule
-        // is used when its coverage covers one, a deny rule when its pattern
-        // matches one.
+        // is used when its coverage covers one. The deny marking lives in the
+        // child evaluation below: a deny-matching directory is always hidden
+        // and only visible subdirectories are queued for their own visit, so
+        // a directory-level deny marking could never fire.
         for rule in rules.iter_mut() {
             if let Some(allow_path) = &rule.allow_path
                 && allow_covers(allow_path, &segments)
-            {
-                rule.used = true;
-            }
-            if let Some(pattern) = &rule.deny
-                && pattern.matches(&segments)
             {
                 rule.used = true;
             }
@@ -743,12 +750,11 @@ pub async fn run_access_check(
             .map_err(|_| format!("The shared directory \"{}\" could not be read; the access check needs the real structure.", directory.display()))?;
         let mut blocked: Vec<(String, String)> = Vec::new();
         let mut subdirs: Vec<String> = Vec::new();
-        while let Some(item) = reader.next_entry().await.map_err(|_| {
-            format!(
-                "The shared directory \"{}\" could not be read.",
-                directory.display()
-            )
-        })? {
+        while let Some(item) = reader
+            .next_entry()
+            .await
+            .map_err(|_| unreadable_directory_message(&directory))?
+        {
             let raw_name = item.file_name();
             let name = if let Some(name) = raw_name.to_str() {
                 name.to_string()
@@ -952,6 +958,126 @@ mod tests {
     fn visible(config: &AccessConfig, groups: &[&str], relative: &str) -> bool {
         let groups: Vec<String> = groups.iter().map(|g| g.to_string()).collect();
         is_path_visible(config, &groups, relative)
+    }
+
+    /// The propagation of the per-entry validation errors through
+    /// `validate_access_config`: an invalid allow path, deny pattern, grant
+    /// entry path, or grant deny pattern surfaces with its message. The
+    /// direct validator tests cover the validators themselves; this covers
+    /// the `?` propagation through the loop bodies.
+    #[test]
+    fn invalid_entries_propagate_through_validate_access_config() {
+        let block = AccessConfigFile {
+            allow: vec!["with\\backslash".to_string()],
+            deny: Vec::new(),
+            grants: BTreeMap::new(),
+        };
+        let error =
+            validate_access_config(block).expect_err("an invalid allow path must be refused");
+        assert!(error.contains("backslashes and NUL are not allowed"));
+
+        let block = AccessConfigFile {
+            allow: Vec::new(),
+            deny: vec!["with\\backslash".to_string()],
+            grants: BTreeMap::new(),
+        };
+        let error =
+            validate_access_config(block).expect_err("an invalid deny pattern must be refused");
+        assert!(error.contains("backslashes and NUL are not allowed"));
+
+        let block = AccessConfigFile {
+            allow: Vec::new(),
+            deny: Vec::new(),
+            grants: BTreeMap::from([(
+                "yafm-tv".to_string(),
+                GrantFile {
+                    delete: false,
+                    allow: vec![AllowEntryFile {
+                        path: "with\\backslash".to_string(),
+                        deny: Vec::new(),
+                    }],
+                },
+            )]),
+        };
+        let error =
+            validate_access_config(block).expect_err("an invalid grant entry path must be refused");
+        assert!(error.contains("backslashes and NUL are not allowed"));
+
+        let block = AccessConfigFile {
+            allow: Vec::new(),
+            deny: Vec::new(),
+            grants: BTreeMap::from([(
+                "yafm-tv".to_string(),
+                GrantFile {
+                    delete: false,
+                    allow: vec![AllowEntryFile {
+                        path: "common".to_string(),
+                        deny: vec!["with\\backslash".to_string()],
+                    }],
+                },
+            )]),
+        };
+        let error = validate_access_config(block)
+            .expect_err("an invalid grant deny pattern must be refused");
+        assert!(error.contains("backslashes and NUL are not allowed"));
+    }
+
+    #[test]
+    fn duplicate_deny_lists_are_refused() {
+        let block = AccessConfigFile {
+            allow: Vec::new(),
+            deny: vec!["tmp/**".to_string(), "tmp/**".to_string()],
+            grants: BTreeMap::new(),
+        };
+        let error =
+            validate_access_config(block).expect_err("duplicate deny lists must be refused");
+        assert!(error.contains("more than once"));
+    }
+
+    #[test]
+    fn an_empty_grant_group_name_is_refused() {
+        let block = AccessConfigFile {
+            allow: Vec::new(),
+            deny: Vec::new(),
+            grants: BTreeMap::from([(
+                "   ".to_string(),
+                GrantFile {
+                    delete: false,
+                    allow: Vec::new(),
+                },
+            )]),
+        };
+        let error = validate_access_config(block).expect_err("an empty group name must be refused");
+        assert!(error.contains("group names must be non-empty"));
+    }
+
+    #[test]
+    fn a_deny_pattern_with_backslash_or_nul_is_refused() {
+        let error =
+            validate_deny_pattern("with\\backslash").expect_err("a backslash must be refused");
+        assert!(error.contains("backslashes and NUL are not allowed"));
+
+        let error = validate_deny_pattern("with\0nul").expect_err("a NUL must be refused");
+        assert!(error.contains("backslashes and NUL are not allowed"));
+    }
+
+    #[test]
+    fn the_question_mark_glob_needs_a_byte_and_an_empty_segment_never_matches() {
+        assert!(segment_matches("?", "x"));
+        assert!(!segment_matches("?", ""));
+        // An empty pattern segment matches only an empty path segment; both
+        // are refused at validation, so the matcher never sees them in
+        // practice.
+        assert!(segment_matches("", ""));
+        assert!(!segment_matches("", "x"));
+    }
+
+    #[test]
+    fn a_non_utf8_percent_decode_yields_no_path() {
+        // The decoded bytes 0x80 are never valid UTF-8; the decode returns
+        // None so the literal evaluation decides instead of mis-addressing an
+        // entry the decoded form cannot reference.
+        assert!(decode_equivalent("%80").is_none());
     }
 
     /// A config with a delete-enabled grant scoped to `/dev` and a grant
@@ -1274,6 +1400,12 @@ mod tests {
 
         let error = validate_deny_pattern("a/../b").expect_err("`..` segments must be refused");
         assert!(error.contains("`..`"));
+
+        // Collapsed empty segments are refused for deny patterns too: the
+        // normalizer keeps interior empty segments, only the leading `/` and
+        // `./` go away.
+        let error = validate_deny_pattern("a//b").expect_err("empty segments must be refused");
+        assert!(error.contains("segments must not be empty"));
     }
 
     #[test]
@@ -1514,5 +1646,80 @@ mod tests {
         // matching grants by deny-by-default, so the verdict is the same as
         // its parent's even though the global deny also matches .env.
         assert!(line.contains("hidden: no allow entry matches"), "{line}");
+    }
+
+    /// A global deny that matches a walked, visible entry is marked as used
+    /// and does not appear in the unused-rule section.
+    #[tokio::test]
+    async fn a_fired_global_deny_is_marked_used_in_the_access_check_report() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let root = temp.path().join("share");
+        fs::create_dir_all(root.join("common")).expect("create the tree");
+        fs::write(root.join("common").join(".env"), "secret").expect("write env");
+
+        let config = AccessConfig {
+            global_allow: vec![validate_allow_path("/common").expect("the root allow")],
+            global_deny: deny_patterns(&[".env"]),
+            grants: BTreeMap::new(),
+        };
+        let report = run_access_check(&root, &config, &["yafm-tv".to_string()])
+            .await
+            .expect("the check report");
+
+        assert!(
+            report.contains(".env (file): denied by \".env\" (global deny)"),
+            "{report}"
+        );
+        // The fired deny is not among the unused rules: the walk evaluated
+        // at least one path, every rule fired, and the unused section says so.
+        assert!(
+            report.contains("rules that matched nothing: none"),
+            "{report}"
+        );
+    }
+
+    /// An entry name that is not valid UTF-8 cannot be written into the
+    /// report; the check skips it, while a named sibling is still listed.
+    #[tokio::test]
+    async fn a_non_utf8_entry_name_is_skipped_by_the_access_check() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let root = temp.path().join("share");
+        let common = root.join("common");
+        fs::create_dir_all(&common).expect("create the tree");
+        fs::write(common.join("sibling.env"), "secret").expect("write sibling");
+        fs::write(common.join(std::ffi::OsStr::from_bytes(&[0xFF])), "data")
+            .expect("write a non-utf8 name");
+
+        let config = AccessConfig {
+            global_allow: vec![validate_allow_path("/common").expect("the root allow")],
+            global_deny: deny_patterns(&["*.env"]),
+            grants: BTreeMap::new(),
+        };
+        let report = run_access_check(&root, &config, &[])
+            .await
+            .expect("the check report");
+
+        // /common is walked; the sibling is listed, the non-UTF8 name never
+        // appears (the report is valid UTF-8 by construction).
+        assert!(report.contains("/common  visible"), "{report}");
+        assert!(
+            report.contains("sibling.env (file): denied by \"*.env\""),
+            "{report}"
+        );
+        assert!(
+            !report.bytes().any(|byte| byte == 0xFF),
+            "the report must not contain raw non-UTF8 bytes: {report}"
+        );
+    }
+
+    #[test]
+    fn the_unreadable_directory_message_names_the_directory() {
+        let message = unreadable_directory_message(std::path::Path::new("/tmp/share"));
+        assert_eq!(
+            message,
+            "The shared directory \"/tmp/share\" could not be read."
+        );
     }
 }

@@ -36,6 +36,14 @@ fn fixture() -> &'static TempDir {
             "leaf",
         )
         .expect("write leaf");
+        // A symlink whose target does not exist: the listing skips it (the
+        // canonicalize fails and the walk continues), so it never appears in
+        // any listing and the exact-name assertions below are unaffected.
+        std::os::unix::fs::symlink(
+            shared_root.join("no-such-target.txt"),
+            shared_root.join("broken.link"),
+        )
+        .expect("create broken symlink");
 
         fs::write(
             fixture_config_path(&temp),
@@ -223,4 +231,48 @@ async fn nested_listing_reports_parent_path_and_root_reports_none() {
     let json: Value = serde_json::from_slice(&bytes).expect("json body");
     assert_eq!(json["currentPath"], "");
     assert!(json["parentPath"].is_null());
+}
+
+#[tokio::test]
+async fn a_broken_symlink_entry_is_skipped() {
+    initialize().await;
+    let app = backend::app_router();
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/directory")
+                .method("GET")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("directory response");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect body")
+        .to_bytes();
+    let json: Value = serde_json::from_slice(&bytes).expect("json body");
+
+    // The broken symlink (target does not exist) never resolves, so the walk
+    // skips it instead of listing an entry that cannot be opened; every
+    // real entry is still listed.
+    let names: Vec<&str> = json["entries"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .map(|entry| entry["name"].as_str().expect("entry name"))
+        .collect();
+    assert!(
+        !names.contains(&"broken.link"),
+        "broken link must be skipped"
+    );
+    for expected in ["outer", "zeta_dir", "alpha.txt", "Bravo.txt"] {
+        assert!(names.contains(&expected), "missing {expected}");
+    }
 }

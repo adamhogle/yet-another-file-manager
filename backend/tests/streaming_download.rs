@@ -4,6 +4,7 @@ use axum::http::{Request, StatusCode};
 use axum::response::Response;
 use http_body_util::BodyExt;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use tempfile::TempDir;
 use tower::util::ServiceExt;
@@ -285,4 +286,62 @@ async fn download_serves_full_body_range_and_etag_semantics() {
         .expect("collect body")
         .to_bytes();
     assert_eq!(&body[..], FILE_CONTENT);
+
+    // The If-Range HTTP-date form: a date matching the file's mtime at second
+    // resolution serves the range; a different date widens back to the full
+    // representation, and an unrecognized date never serves it.
+    let modified = fs::metadata(shared_root.join("range.txt"))
+        .expect("metadata")
+        .modified()
+        .expect("mtime");
+    let mtime: chrono::DateTime<chrono::Utc> = modified.into();
+    let http_date = mtime.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
+    let response =
+        download_request(&app, &[("range", "bytes=0-4"), ("if-range", &http_date)]).await;
+    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    let response = download_request(
+        &app,
+        &[
+            ("range", "bytes=0-4"),
+            ("if-range", "Mon, 01 Jan 2001 00:00:00 GMT"),
+        ],
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // An unreadable file (no read bit) answers 503: the open fails with
+    // PermissionDenied, which is not NotFound, so the shared unavailable
+    // shape is served and no host path leaks.
+    let blocked = shared_root.join("blocked.txt");
+    fs::write(&blocked, "secret").expect("write blocked");
+    fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000)).expect("set permissions");
+    let response = download_request_for(&app, "/api/v1/download?p=blocked.txt").await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    // Restore so the temp dir cleanup can remove the tree.
+    fs::set_permissions(&blocked, fs::Permissions::from_mode(0o644)).expect("set permissions");
+
+    // The Disabled test state reaches the delete handler without an access
+    // context; an empty `p` is refused before any filesystem access. This
+    // binary's single test owns the config, so the gate cannot answer 503
+    // for an uninitialized application config.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/file?p=")
+                .method("DELETE")
+                .body(Body::empty())
+                .expect("delete request"),
+        )
+        .await
+        .expect("delete response");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect body")
+        .to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+    assert_eq!(json["message"], "The requested path is invalid.");
 }

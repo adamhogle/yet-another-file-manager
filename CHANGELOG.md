@@ -11,6 +11,7 @@ line was last set in `version.json`. See README, Versioning.
 ### Added
 
 - Added an nginx-style access log that emits a line for each login (success and failure) and each file download outcome in the existing tracing stream, under the `yafm::access` target. A new opt-in `trustProxy` config flag controls whether the logged client IP comes from `X-Forwarded-For` (behind a trusted reverse proxy) or the peer socket. Under `trustProxy`, the left-most hop is logged only when it parses as an IP address, and user-controlled fields are escaped at render time, so a forged path or header cannot split a log line. The user field is quoted, so a display name with spaces cannot shift the columns, and a HEAD download logs zero bytes.
+- Added a Rust test coverage gate: `cargo-llvm-cov` with a 99 percent library line-coverage floor plus a checked-in baseline of accepted uncovered line numbers that fails on any new uncovered line the report lists. The gate emits the lcov report llvm-cov's own uncovered-lines listing is derived from, and the CI tool is pinned so a tool release cannot shift the measurement without a change in this repo.
 
 ## [2026.09.20] - 2026-09-13
 

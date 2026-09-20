@@ -10,8 +10,9 @@
 //! only regular files are deleted.
 
 use std::net::TcpListener;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use tokio::sync::{Mutex, MutexGuard};
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -29,7 +30,7 @@ static FIXTURE_PATH: once_cell::sync::OnceCell<(tempfile::TempDir, PathBuf)> =
 /// The fixture lock: every test body holds it for its duration, so the
 /// mutating delete test cannot race the read-only tests (the cargo test
 /// harness runs the tests of one binary concurrently by default).
-static FIXTURE_LOCK: Mutex<()> = Mutex::new(());
+static FIXTURE_LOCK: Mutex<()> = Mutex::const_new(());
 
 fn fixture_config_path() -> &'static PathBuf {
     let (_, path) = FIXTURE_PATH.get_or_init(|| {
@@ -91,11 +92,11 @@ fn reset_share_tree() {
 
 /// The fixture-lock guard with a fresh share tree: every test takes it as its
 /// first step and holds it for its duration, so the tests are serialized and
-/// the reset cannot race a concurrent reader. Poisoning is collapsed into the
-/// inner guard: a panicking test leaves the lock usable, the reset fixes the
-/// tree, and the next test starts clean.
-fn locked_fixture() -> MutexGuard<'static, ()> {
-    let guard = FIXTURE_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+/// the reset cannot race a concurrent reader. The async mutex never poisons,
+/// so a panicking test leaves the lock usable, the reset fixes the tree, and
+/// the next test starts clean.
+async fn locked_fixture() -> MutexGuard<'static, ()> {
+    let guard = FIXTURE_LOCK.lock().await;
     reset_share_tree();
     guard
 }
@@ -154,7 +155,7 @@ async fn body_string(response: axum::http::Response<Body>) -> String {
 
 #[tokio::test]
 async fn a_delete_enabled_grant_deletes_its_own_visible_files() {
-    let _fixture = locked_fixture();
+    let _fixture = locked_fixture().await;
     let app = access_router().await;
     let cookie = minted_cookie(&["yafm-devs"]);
 
@@ -166,7 +167,7 @@ async fn a_delete_enabled_grant_deletes_its_own_visible_files() {
 
 #[tokio::test]
 async fn a_visible_file_outside_the_delete_grant_answers_403() {
-    let _fixture = locked_fixture();
+    let _fixture = locked_fixture().await;
     let app = access_router().await;
     let cookie = minted_cookie(&["yafm-devs"]);
 
@@ -184,7 +185,7 @@ async fn a_visible_file_outside_the_delete_grant_answers_403() {
 
 #[tokio::test]
 async fn hidden_paths_answer_404_like_nonexistent_paths() {
-    let _fixture = locked_fixture();
+    let _fixture = locked_fixture().await;
     let app = access_router().await;
     let cookie = minted_cookie(&["yafm-devs"]);
 
@@ -215,7 +216,7 @@ async fn hidden_paths_answer_404_like_nonexistent_paths() {
 
 #[tokio::test]
 async fn directories_and_symlinks_are_refused_with_400() {
-    let _fixture = locked_fixture();
+    let _fixture = locked_fixture().await;
     let app = access_router().await;
     let cookie = minted_cookie(&["yafm-devs"]);
 
@@ -238,7 +239,7 @@ async fn directories_and_symlinks_are_refused_with_400() {
 
 #[tokio::test]
 async fn a_session_without_delete_permission_answers_403() {
-    let _fixture = locked_fixture();
+    let _fixture = locked_fixture().await;
     let app = access_router().await;
     // A user whose groups the config does not name: baseline only, no delete.
     let cookie = minted_cookie(&["yafm-other"]);
@@ -255,7 +256,7 @@ async fn a_session_without_delete_permission_answers_403() {
 
 #[tokio::test]
 async fn a_parent_dir_probe_answers_404_with_the_file_message() {
-    let _fixture = locked_fixture();
+    let _fixture = locked_fixture().await;
     let app = access_router().await;
     let cookie = minted_cookie(&["yafm-devs"]);
 
@@ -271,8 +272,77 @@ async fn a_parent_dir_probe_answers_404_with_the_file_message() {
 }
 
 #[tokio::test]
+async fn a_file_used_as_a_parent_directory_answers_404() {
+    let _fixture = locked_fixture().await;
+    let app = access_router().await;
+    let cookie = minted_cookie(&["yafm-devs"]);
+
+    // dev/main.rs is a visible file, so the gate passes the request through;
+    // the handler refuses a parent that is not a directory.
+    let response = request(
+        &app,
+        "DELETE",
+        "/api/v1/file?p=dev/main.rs/child.txt",
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert!(fixture_shared_root().join("dev/main.rs").exists());
+}
+
+#[tokio::test]
+async fn a_path_with_a_backslash_answers_400() {
+    let _fixture = locked_fixture().await;
+    let app = access_router().await;
+    let cookie = minted_cookie(&["yafm-devs"]);
+
+    // The percent-encoded backslash decodes into the raw byte the shared
+    // validator refuses; the gate passes it through and the handler answers
+    // 400 with the invalid-path message.
+    let response = request(
+        &app,
+        "DELETE",
+        "/api/v1/file?p=dev%5Cmain.rs",
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        body_string(response).await,
+        "{\"message\":\"The requested path is invalid.\"}"
+    );
+}
+
+#[tokio::test]
+async fn an_unwritable_parent_mount_answers_503() {
+    let _fixture = locked_fixture().await;
+    let app = access_router().await;
+    let cookie = minted_cookie(&["yafm-devs"]);
+
+    // The fail-closed signal for a read-only mount: the parent directory
+    // loses its write bit, so remove_file fails with PermissionDenied and
+    // the endpoint answers 503 instead of pretending the delete happened.
+    let dev = fixture_shared_root().join("dev");
+    std::fs::set_permissions(&dev, std::fs::Permissions::from_mode(0o555))
+        .expect("set permissions");
+
+    let response = request(&app, "DELETE", "/api/v1/file?p=dev/main.rs", Some(&cookie)).await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        body_string(response).await,
+        "{\"message\":\"The shared directory is not writable; file deletion requires a writable mount.\"}"
+    );
+    // The file survives.
+    assert!(fixture_shared_root().join("dev/main.rs").exists());
+
+    // Restore so the fixture reset and the other tests see a writable tree.
+    std::fs::set_permissions(&dev, std::fs::Permissions::from_mode(0o755))
+        .expect("set permissions");
+}
+
+#[tokio::test]
 async fn the_listing_reports_can_delete_per_entry() {
-    let _fixture = locked_fixture();
+    let _fixture = locked_fixture().await;
     let app = access_router().await;
     let cookie = minted_cookie(&["yafm-devs"]);
 
@@ -300,4 +370,14 @@ async fn the_listing_reports_can_delete_per_entry() {
     assert_eq!(entry("main.rs.link")["canDelete"], true);
     assert_eq!(entry("tmp")["kind"], "directory");
     assert_eq!(entry("tmp")["canDelete"], false);
+}
+
+#[tokio::test]
+async fn the_access_state_accessor_reports_the_initialized_config() {
+    let _fixture = locked_fixture().await;
+    let _router = access_router().await;
+    // The fixture config carries an `access` block: the accessor reports it
+    // instead of None, so the gate middleware and the handlers read the same
+    // config.
+    assert!(backend::get_access_state_config().is_some());
 }

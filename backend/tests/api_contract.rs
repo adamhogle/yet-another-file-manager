@@ -373,3 +373,34 @@ async fn health_endpoint_reports_ok_and_the_service_name() {
     assert_eq!(json["status"], "ok");
     assert_eq!(json["service"], "backend");
 }
+
+#[tokio::test]
+async fn users_me_fails_closed_without_an_identity() {
+    // The Disabled test state reaches the handler without identity claims,
+    // so the session endpoint fails closed with the unavailable shape.
+    backend::initialize_auth_disabled_for_tests();
+
+    let app = backend::app_router();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/users/me")
+                .method("GET")
+                .body(Body::empty())
+                .expect("users/me request"),
+        )
+        .await
+        .expect("users/me response");
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect body")
+        .to_bytes();
+    let json: Value = serde_json::from_slice(&bytes).expect("json body");
+    assert_eq!(json["message"], "Authentication is unavailable.");
+}
