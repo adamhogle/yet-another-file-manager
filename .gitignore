@@ -31,3 +31,4 @@ backend/target/
 
 # Internal agent planning artifacts (not part of the public repo)
 .pi/
+docs/superpowers/
